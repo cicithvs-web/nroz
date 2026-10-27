@@ -1,19 +1,22 @@
 {
   "name": "nroz-ai-bot",
   "version": "1.0.0",
-  "description": "Bot Telegram AI dengan memori Supabase dan pembaca dokumen",
+  "description": "Bot Telegram AI dengan memori Onlyx DB dan pembaca dokumen",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "test-db": "node test-db.js"
   },
   "dependencies": {
     "adm-zip": "^0.5.10",
-    "@supabase/supabase-js": "^2.50.0",
     "axios": "^1.x",
     "dotenv": "^16.x",
     "mammoth": "^1.x",
     "node-telegram-bot-api": "^0.66.0",
     "openai": "^4.50.0",
     "pdf-parse": "^1.1.1"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

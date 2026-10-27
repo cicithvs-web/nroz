@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+remotion-engine/node_modules/
+
+# Environment and sensitive configs
+.env
+config.json
+scheduler_data.json
+
+# Workspace and temporary runtime data
+workspace/
+remotion-engine/renders/
+remotion-engine/public/*.mp3
+remotion-engine/public/*.wav
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
