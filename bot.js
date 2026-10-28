@@ -35,47 +35,106 @@ const { resetSandbox, getSandboxInfo } = require("./sandboxManager.js");
 const { initScheduler, listTasks, removeTask } = require("./schedulerManager.js");
 const { transcribeAudio } = require("./voiceManager.js");
 const { onRenderComplete } = require("./remotionManager.js");
+const { createShareLink } = require("./videoShareManager.js");
 
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : "7368157605";
 const CONFIG_FILE = path.join(__dirname, "config.json");
+
+// Bot API menolak upload > 50 MB, jadi video di atas ambang ini dikirim sebagai link unduhan.
+const TELEGRAM_SEND_MAX_MB = Number(process.env.TELEGRAM_SEND_MAX_MB) || 48;
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 initScheduler(bot);
 
 // Render video berjalan di latar belakang, jadi hasilnya dikirim ke chat
 // saat job selesai — bukan lewat jawaban AI yang sudah lama berakhir.
-onRenderComplete(async (job) => {
+// Video yang lebih besar dari batas upload bot dikirim sebagai link unduhan (Cloudflare Tunnel),
+// karena kompres paksa sampai muat 50 MB akan menghancurkan kualitasnya.
+async function deliverRenderResult(job) {
   const res = job.result || {};
+  const sendOpts = job.threadId ? { message_thread_id: job.threadId } : {};
+
+  if (!res.success || !res.videoPath || !fs.existsSync(res.videoPath)) {
+    await bot.sendMessage(
+      job.chatId,
+      `❌ Render video (job #${job.id}) gagal:\n${String(res.error || "penyebab tidak diketahui").slice(0, 800)}`,
+      sendOpts
+    );
+    return;
+  }
+
+  const sizeMb = fs.statSync(res.videoPath).size / (1024 * 1024);
+  const kirimSebagaiLink = async () => {
+    const share = await createShareLink(res.videoPath, { chatId: job.chatId });
+    const kadarKedaluwarsa = new Date(share.expiresAt).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+    await bot.sendMessage(
+      job.chatId,
+      `🎬 Video selesai dirender (job #${job.id}) — tapi ukurannya ${share.sizeMb} MB, di atas batas upload bot 50 MB, jadi diambil lewat link.\n\n` +
+        `🔗 ${share.url}\n\n` +
+        `• Durasi: ${res.duration} detik\n` +
+        `• Ukuran: ${share.sizeMb} MB\n` +
+        `• Waktu render: ${res.elapsedSec} detik\n` +
+        `• Link aktif sampai ${kadarKedaluwarsa} WIB, bisa langsung diputar dan di-seek di browser HP.` +
+        (share.ready ? "" : "\n• Link baru akan bisa dibuka ±1 menit lagi (DNS Cloudflare masih menyebarkan alamatnya).") +
+        `\nKalau link tidak terbuka (server baru saja direstart), bilang saja — aku kirim link baru.`,
+      sendOpts
+    );
+    console.log(`[Remotion Queue] Job #${job.id} dikirim sebagai link unduhan (${share.sizeMb} MB > ${TELEGRAM_SEND_MAX_MB} MB, ready=${share.ready}).`);
+  };
+
+  if (sizeMb > TELEGRAM_SEND_MAX_MB) {
+    try {
+      await kirimSebagaiLink();
+    } catch (err) {
+      console.error(`[Remotion Queue] Gagal membuat link unduhan job #${job.id}:`, err.message);
+      await bot.sendMessage(
+        job.chatId,
+        `🎬 Video job #${job.id} sudah jadi (${sizeMb.toFixed(1)} MB) tapi link unduhannya gagal dibuat: ${err.message}\n` +
+          `File tersimpan di workspace sebagai ${path.basename(res.videoPath)}.`,
+        sendOpts
+      );
+    }
+    return;
+  }
+
+  try {
+    await bot.sendVideo(
+      job.chatId,
+      res.videoPath,
+      {
+        caption:
+          `🎬 *Video Selesai Dirender* (job #${job.id})\n` +
+          `• File: \`${path.basename(res.videoPath)}\`\n` +
+          `• Durasi: ${res.duration} detik\n` +
+          `• Ukuran: ${res.sizeMb} MB\n` +
+          `• Waktu render: ${res.elapsedSec} detik`,
+        parse_mode: "Markdown",
+        supports_streaming: true,
+        ...sendOpts
+      }
+    );
+  } catch (err) {
+    // Telegram masih bisa menolak (413) untuk file di dekat batas; link adalah jalan keluar.
+    if (/413|too large/i.test(err.message)) {
+      console.warn(`[Remotion Queue] Job #${job.id} ditolak Telegram (413), beralih ke link unduhan.`);
+      try {
+        await kirimSebagaiLink();
+        return;
+      } catch (linkErr) {
+        console.error(`[Remotion Queue] Fallback link job #${job.id} juga gagal:`, linkErr.message);
+      }
+    }
+    throw err;
+  }
+}
+
+onRenderComplete(async (job) => {
   if (!job.chatId) {
     console.warn(`[Remotion Queue] Job #${job.id} selesai tapi tidak punya chatId, hasil tidak dikirim.`);
     return;
   }
-
-  const sendOpts = job.threadId ? { message_thread_id: job.threadId } : {};
   try {
-    if (res.success && res.videoPath && fs.existsSync(res.videoPath)) {
-      await bot.sendVideo(
-        job.chatId,
-        res.videoPath,
-        {
-          caption:
-            `🎬 *Video Selesai Dirender* (job #${job.id})\n` +
-            `• File: \`${path.basename(res.videoPath)}\`\n` +
-            `• Durasi: ${res.duration} detik\n` +
-            `• Ukuran: ${res.sizeMb} MB\n` +
-            `• Waktu render: ${res.elapsedSec} detik`,
-          parse_mode: "Markdown",
-          supports_streaming: true,
-          ...sendOpts
-        }
-      );
-    } else {
-      await bot.sendMessage(
-        job.chatId,
-        `❌ Render video (job #${job.id}) gagal:\n${String(res.error || "penyebab tidak diketahui").slice(0, 800)}`,
-        sendOpts
-      );
-    }
+    await deliverRenderResult(job);
   } catch (err) {
     console.error(`[Remotion Queue] Gagal mengirim hasil job #${job.id} ke chat ${job.chatId}:`, err.message);
   }
@@ -273,6 +332,9 @@ Pedoman & Fitur Unggulan:
     dan kalau file memang tidak ada kamu diberi tahu sebelum render dimulai, bukan 404 di tengah jalan.
   • Video panjang itu mahal: \`render_remotion_video\` di server ini ±0,35 detik per frame. 5 menit @30fps ≈ 53 menit,
     @15fps ≈ 26 menit. Untuk video > 2 menit selalu kirim \`fps: 15\` dan sebutkan estimasi itu ke user.
+  • Video hasil render DIKIRIM OTOMATIS: yang ≤ 48 MB masuk sebagai video native di chat, yang lebih besar otomatis
+    dikirim sebagai link unduhan HTTPS (aktif ±72 jam). Karena itu JANGAN pernah kompres ulang, pecah video, atau ubah
+    bitrate sendiri supaya muat 50 MB — kualitas video panjang justru rusak, dan sistem sudah punya jalur link untuk itu.
 
   Aturan Path Sandbox (PENTING, sering bikin gagal):
   • \`run_command\` dan \`run_code\` jalan di container Docker yang HANYA melihat folder kerjamu sebagai \`/workspace\`.

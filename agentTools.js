@@ -1344,6 +1344,8 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
     `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})${catatanNarasi}\n` +
     `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}${catatanAudio}\n\n` +
     `PENTING: Video akan DIKIRIM OTOMATIS oleh sistem ke chat ini saat render selesai.\n` +
+    `Hasil ≤ 48 MB masuk sebagai video native; yang lebih besar dikirim otomatis sebagai link unduhan HTTPS — ` +
+    `jadi JANGAN mengompres ulang, menurunkan bitrate, atau memecah video supaya muat 50 MB.\n` +
     `Jangan menunggu hasil, jangan render ulang kode yang sama, dan jangan pakai tag <<<SENDVIDEO>>>.\n` +
     `Cukup kabari user bahwa videonya sedang dikerjakan, lalu akhiri jawabanmu.`
   );

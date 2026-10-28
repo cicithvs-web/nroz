@@ -30,7 +30,13 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
      otomatis dari folder sesi ke `remotion-engine/public` sebelum render (tidak ada lagi 404 di tengah render).
    - Estimasi waktu memakai `REMOTION_FRAME_SECONDS` (bawaan 0,35 s/frame) — konservatif karena satu render aktif
      di 2 vCPU terukur 0,13-0,56 s/frame tergantung beban server.
-   - Otomatis dikirim ke Telegram sebagai video native (`bot.sendVideo`) dengan fitur streaming playback.
+   - Hasil ≤ 48 MB dikirim sebagai video native (`bot.sendVideo`) dengan streaming playback; yang lebih besar
+     otomatis dikirim sebagai **link unduhan HTTPS** lewat Cloudflare Quick Tunnel (`videoShareManager.js`), karena
+     Bot API menolak upload di atas 50 MB dan memaksanya lewat kompres akan membuat video panjang jadi burik.
+     Link dipakai ulang per tunnel, mendukung HTTP Range (bisa di-seek di browser), dan kedaluwarsa setelah
+     `VIDEO_SHARE_TTL_HOURS` (bawaan 72 jam). Ambang kirim diatur lewat `TELEGRAM_SEND_MAX_MB`, port lokal lewat
+     `VIDEO_SHARE_PORT`. Catatan: quick tunnel mendapat hostname acak, jadi link lama mati saat bot direstart.
+   - Butuh binary `cloudflared` di host (`/usr/local/bin/cloudflared`) — dipakai juga oleh fitur Web Preview.
 
 3. **🎙️ Voice Note Transcriber (Whisper Local)**:
    - Menerima rekaman suara Telegram (`.oga`/audio) dan mentranskripsikannya ke teks menggunakan **Faster-Whisper** di VPS.
