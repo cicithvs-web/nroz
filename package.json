@@ -13,7 +13,7 @@
     "dotenv": "^16.x",
     "mammoth": "^1.x",
     "node-telegram-bot-api": "^0.66.0",
-    "openai": "^4.50.0",
+    "openai": "5.23.2",
     "pdf-parse": "^1.1.1"
   },
   "engines": {
