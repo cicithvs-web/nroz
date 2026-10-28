@@ -98,6 +98,48 @@ if (!fs.existsSync(REMOTION_PUBLIC)) {
 }
 
 /**
+ * Sanitasi interpolate() ranges dalam kode AI-generated.
+ * Remotion mengharuskan inputRange strictly monotonically increasing.
+ * AI sering menghasilkan [1, 0] — kita balik otomatis dan reverse outputRange.
+ */
+function sanitizeInterpolateRanges(src) {
+  const re = /interpolate\s*\(\s*([^,]+),\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*\]\s*,\s*\[\s*([^\]]+)\]/g;
+  return src.replace(re, (match, frame, a, b, outputInner) => {
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (numA > numB) {
+      const outputs = outputInner.split(",").map((s) => s.trim());
+      const reversed = outputs.reverse().join(", ");
+      console.log("[Remotion Sanitize] Fixed interpolate inputRange [" + a + ", " + b + "] -> [" + b + ", " + a + "]");
+      return "interpolate(" + frame + ", [" + b + ", " + a + "], [" + reversed + "]";
+    }
+    return match;
+  });
+}
+
+/**
+ * Strip referensi ke audio/media asset yang tidak ada dari kode.
+ * AI sering membuat staticFile("something.mp3") tapi file tidak ada.
+ */
+function stripMissingAssetRefs(src, missingNames) {
+  let result = src;
+  for (const name of missingNames) {
+    // Simple string-based replacement: remove lines containing staticFile("missingName")
+    const lines = result.split("\n");
+    const filtered = lines.filter((line) => {
+      if (line.includes("staticFile") && line.includes(name)) {
+        console.log("[Remotion Sanitize] Stripped missing asset ref: " + name);
+        return false;
+      }
+      return true;
+    });
+    result = filtered.join("\n");
+  }
+  return result;
+}
+
+
+/**
  * Render video dari kode React/Remotion
  * @param {Object} options
  * @param {string} options.code - Kode sumber React Component / Composition
@@ -213,6 +255,10 @@ async function runRender({
     cleanCode = cleanCode.replace(/^```(?:tsx|jsx|typescript|javascript|react)?\s*/i, "");
     cleanCode = cleanCode.replace(/```\s*$/i, "");
 
+    // 2a. Sanitasi interpolate() ranges — AI sering menghasilkan range terbalik
+    // seperti [1, 0] yang menyebabkan crash. Perbaiki otomatis.
+    cleanCode = sanitizeInterpolateRanges(cleanCode);
+
     // 2b. Siapkan aset staticFile(...) dari workspace sesi + gagal cepat kalau ada yang hilang,
     // supaya tidak berakhir sebagai 404 di tengah render.
     const staged = stageStaticAssets(cleanCode, userWs);
@@ -221,10 +267,9 @@ async function runRender({
       console.log(`[Remotion Assets] ${staged.copied.length} file disalin dari workspace sesi ke public/.`);
     }
     if (staged.missing.length) {
-      throw new Error(
-        `staticFile ${staged.missing.map((n) => `"${n}"`).join(", ")} tidak ditemukan di public/ maupun /workspace/.\n` +
-        `Simpan file itu ke /workspace/ dengan nama persis, atau hilangkan pemanggilannya dari kode.`
-      );
+      console.warn("[Remotion Assets] ⚠️ Asset tidak ditemukan: " + staged.missing.join(", ") + " — referensi dihapus dari kode.");
+      // Strip missing asset references instead of crashing the render
+      cleanCode = stripMissingAssetRefs(cleanCode, staged.missing);
     }
 
     const hasRegisterRoot = /registerRoot\s*\(/i.test(cleanCode) && /<Composition/i.test(cleanCode);
