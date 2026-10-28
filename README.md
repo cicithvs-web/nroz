@@ -28,8 +28,12 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
    - Bahan audio dari workspace dipakai langsung: `audio_path` menerima path sandbox (`/workspace/lagu.mp3`)
      dan ditolak dengan pesan jelas kalau file tidak ada, sementara aset `staticFile("...")` di kode React disalin
      otomatis dari folder sesi ke `remotion-engine/public` sebelum render (tidak ada lagi 404 di tengah render).
-   - Estimasi waktu memakai `REMOTION_FRAME_SECONDS` (bawaan 0,35 s/frame) — konservatif karena satu render aktif
-     di 2 vCPU terukur 0,13-0,56 s/frame tergantung beban server.
+   - Estimasi waktu memakai `REMOTION_FRAME_SECONDS` (bawaan 0,35 s/frame); komposisi berat dengan voiceover
+     terukur sampai ±1,3 s/frame di 2 vCPU, jadi batas waktu render = 6x estimasi (minimum 15 menit, maksimum 4 jam,
+     override `REMOTION_RENDER_TIMEOUT_MS`). Kalau proses dihentikan setelah videonya ternyata sudah utuh
+     (diperiksa dengan ffprobe), hasilnya tetap dikirim, tidak dianggap gagal.
+   - Progres render nyata dibaca dari output CLI Remotion (persen, frame, sisa waktu) dan ditampilkan di chat;
+     saat voiceover memanjangkan durasi, jumlah frame dan estimasi ikut dikoreksi.
    - Hasil ≤ 48 MB dikirim sebagai video native (`bot.sendVideo`) dengan streaming playback; yang lebih besar
      otomatis dikirim sebagai **link unduhan HTTPS** lewat Cloudflare Quick Tunnel (`videoShareManager.js`), karena
      Bot API menolak upload di atas 50 MB dan memaksanya lewat kompres akan membuat video panjang jadi burik.

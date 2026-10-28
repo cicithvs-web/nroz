@@ -1336,7 +1336,7 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
 
   const estimasiMenit = Math.max(1, Math.round((job.estimateSec + job.waitSec) / 60));
   const catatanAntrean = position > 1 ? `\n• Posisi antrean: ${position} (render sebelumnya masih berjalan)` : "";
-  const catatanNarasi = narration && narration.length ? `\n• Voiceover: ${narration.length} baris naskah, durasi video mengikuti panjang suara` : "";
+  const catatanNarasi = narration && narration.length ? `\n• Voiceover: ${narration.length} baris naskah, durasi video mengikuti panjang suara (progres di chat memakai durasi sebenarnya)` : "";
 
   return (
     `⏳ Render video #${job.id} dimulai di latar belakang.\n` +

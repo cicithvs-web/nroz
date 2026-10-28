@@ -39,6 +39,18 @@ function clampDurationFps(durationSeconds, fps) {
   return { durSec, safeFps, frames: Math.round(durSec * safeFps) };
 }
 
+/** Durasi file video lewat ffprobe; 0 kalau file tidak ada, rusak, atau belum selesai ditulis. */
+function probeVideoDuration(filePath) {
+  return new Promise((resolve) => {
+    if (!filePath || !fs.existsSync(filePath)) return resolve(0);
+    execFile(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath],
+      (err, out) => resolve(err ? 0 : parseFloat(String(out).trim()) || 0)
+    );
+  });
+}
+
 /** /workspace/<file> = file di workspace sesi; tool lain sudah memetakan ini, render tidak boleh kalah. */
 function resolveWorkspacePath(p, userWs) {
   const clean = String(p).trim();
@@ -114,7 +126,8 @@ async function runRender({
   tts_lines,
   tts_voice = "id-ID-ArdiNeural",
   audio_path,
-  onProgress
+  onProgress,
+  onMeta
 }) {
   const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_\-]/g, "_");
   const userWs = path.join(WORKSPACE_BASE, safeSession);
@@ -140,6 +153,7 @@ async function runRender({
   let narrationSegments = 0;
   let narrationTimings = null;
   let stagedAssets = [];
+  let rescuedNote = null;
   let calculatedDuration = Number(durationSeconds) || 5;
 
   try {
@@ -189,6 +203,10 @@ async function runRender({
     const { durSec, safeFps, frames: totalFrames } = clampDurationFps(calculatedDuration, fps);
     const w = Number(width) || 1080;
     const h = Number(height) || 1920;
+
+    // Voiceover bisa memanjangkan video jauh di atas durationSeconds yang diminta.
+    // Antrean harus tahu angka sebenarnya supaya estimasi dan progres tidak bohong.
+    try { onMeta?.({ durationSeconds: durSec, frames: totalFrames, fps: safeFps }); } catch (_) {}
 
     // 2. Simpan dan format kode React komponen
     let cleanCode = (code || "").trim();
@@ -327,11 +345,13 @@ registerRoot(RemotionRoot);
     console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
 
-    // Render berjalan di latar belakang, jadi batasnya longgar dan ikut panjang video:
-    // 3x estimasi frame, minimal 10 menit, maksimal 4 jam. Override via REMOTION_RENDER_TIMEOUT_MS.
+    // Render berjalan di latar belakang, jadi batasnya longgar dan ikut panjang video.
+    // Faktornya 6x estimasi frame (bukan 3x): komposisi 1080x1920 dengan voiceover terukur
+    // butuh ±1,3 detik/frame di VPS 2 vCPU, sementara FRAME_SECONDS hanya 0,35 — batas 3x
+    // sempat membunuh render yang tinggal 260 detik lagi selesai. Override REMOTION_RENDER_TIMEOUT_MS.
     const RENDER_TIMEOUT_MS =
       Number(process.env.REMOTION_RENDER_TIMEOUT_MS) ||
-      Math.min(4 * 3600_000, Math.max(10 * 60_000, Math.round(totalFrames * FRAME_SECONDS * 3 * 1000)));
+      Math.min(4 * 3600_000, Math.max(15 * 60_000, Math.round(totalFrames * FRAME_SECONDS * 6 * 1000)));
 
     await new Promise((resolve, reject) => {
       const child = spawn("npx", cliArgs, { cwd: REMOTION_DIR });
@@ -404,11 +424,24 @@ registerRoot(RemotionRoot);
         reject(err);
       });
 
-      child.on("close", (code, signal) => {
+      child.on("close", async (code, signal) => {
         clearTimeout(timer);
         if (pending.trim()) handleLine(pending);
 
         if (code === 0 && !timedOut) return resolve();
+
+        // Jangan buang video yang sebenarnya sudah jadi: SIGKILL bisa mendarat saat CLI
+        // masih membersihkan diri setelah encode selesai. Kalau file utuh, pakai hasilnya.
+        if (fs.existsSync(outputFilePath)) {
+          const probedSec = await probeVideoDuration(outputFilePath);
+          if (probedSec >= durSec * 0.9) {
+            rescuedNote =
+              `Proses CLI dihentikan (${timedOut ? `melewati batas ${Math.round(RENDER_TIMEOUT_MS / 1000)} detik` : `code ${code}`}), ` +
+              `tapi videonya sudah lengkap (${probedSec.toFixed(1)}s dari ${durSec}s) — hasil tetap dipakai.`;
+            console.warn(`[Remotion] Job output diselamatkan: ${rescuedNote}`);
+            return resolve();
+          }
+        }
 
         // Baris "npm warn"/"npm notice" selalu muncul di stderr dan bukan penyebab kegagalan,
         // jadi dibuang agar pesan error tidak tertutup noise.
@@ -451,7 +484,8 @@ registerRoot(RemotionRoot);
       duration: durSec,
       sizeMb,
       elapsedSec,
-      segments: narrationSegments
+      segments: narrationSegments,
+      note: rescuedNote
     };
   } catch (err) {
     console.error("[Remotion Error]:", err.message);
@@ -543,10 +577,23 @@ async function runJob(job) {
   console.log(`[Remotion Queue] Job #${job.id} mulai: ${job.duration}s, ${job.frames} frame, estimasi ${Math.max(1, Math.round(job.estimateSec / 60))} menit.`);
   notifyProgress(job, job.progress);
 
-  // onProgress menempel di options (bukan kode user), jadi aman dibuang sebelum hasil disimpan.
-  const { onProgress: _ignored, ...renderOptions } = job.options;
+  // onProgress/onMeta menempel di options (bukan kode user), jadi aman dibuang sebelum hasil disimpan.
+  const { onProgress: _ignored, onMeta: _ignoredMeta, ...renderOptions } = job.options;
   job.result = await runRender({
     ...renderOptions,
+    onMeta: (meta) => {
+      // Voiceover sering memanjangkan video; sinkronkan angka yang dilihat user di chat dan log.
+      if (meta.frames && meta.frames !== job.frames) {
+        console.log(`[Remotion Queue] Job #${job.id} durasi mengikuti voiceover: ${job.duration}s → ${meta.durationSeconds}s (${meta.frames} frame).`);
+        job.duration = meta.durationSeconds;
+        job.frames = meta.frames;
+        job.estimateSec = Math.round(meta.frames * FRAME_SECONDS);
+      }
+      if (job.progress) {
+        job.progress = { ...job.progress, total: meta.frames };
+        notifyProgress(job, job.progress);
+      }
+    },
     onProgress: (progress) => {
       job.progress = { ...progress, elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) };
       notifyProgress(job, job.progress);
