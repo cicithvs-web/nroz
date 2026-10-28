@@ -172,23 +172,79 @@ function execInSandboxAsync(sessionId, command, options = {}) {
   const timeoutMs = options.timeout || 120_000;
   const maxBuffer = options.maxBuffer || 4 * 1024 * 1024;
   const cwd = toSandboxCwd(options.cwd);
+  // lowPriority dipakai saat antrean video sedang merender, supaya pekerjaan berat
+  // di sandbox tidak merebut CPU dan memperlambat render yang sedang dijanjikan ke user.
+  const niceArgs = options.lowPriority ? ["nice", "-n", "10", "ionice", "-c2", "-n7"] : [];
 
   return new Promise((resolve, reject) => {
-    execFile(
-      "docker",
-      ["exec", "-i", "-w", cwd, containerName, "bash", "-c", command],
-      { timeout: timeoutMs, maxBuffer, encoding: "utf-8", windowsHide: true },
-      (err, stdout, stderr) => {
-        if (err) {
-          err.stdout = stdout || "";
-          err.stderr = stderr || "";
-          err._sandboxTimeoutMs = timeoutMs;
-          reject(err);
-          return;
-        }
-        resolve(stdout);
+    // Perintah dikirim lewat stdin (bash -s), bukan sebagai argumen, supaya cmdline proses di
+    // dalam container hanya "bash -s". Kalau tidak, `pkill -f render.mjs` akan mencocokki
+    // shell yang sedang menjalankan perintah itu sendiri dan membunuhnya.
+    // cat: execFile dengan opsi `input` tidak menutup stream ke `docker exec -i`, jadi bash
+    // menunggu selamanya; stdin harus ditulis dan di-end eksplisit memakai spawn.
+    const child = spawn("docker", ["exec", "-i", "-w", cwd, containerName, ...niceArgs, "bash", "-s"], {
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let overflow = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > maxBuffer) {
+        overflow = true;
+        child.kill("SIGKILL");
       }
-    );
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.stdin.on("error", () => {}); // EPIPE biasa terjadi bila perintah selesai lebih cepat
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        const err = new Error(`Perintah dihentikan setelah ${Math.round(timeoutMs / 1000)} detik`);
+        err.killed = true;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (overflow) {
+        const err = new Error("Output perintah melebihi batas buffer dan dihentikan");
+        err.stdout = stdout;
+        err.stderr = stderr;
+        err.code = code;
+        reject(err);
+        return;
+      }
+      if (code !== 0) {
+        const err = new Error(`Perintah selesai dengan kode ${code ?? signal}`);
+        err.code = code;
+        err.signal = signal;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(stdout);
+    });
+
+    child.stdin.write(command.endsWith("\n") ? command : `${command}\n`);
+    child.stdin.end();
   });
 }
 
@@ -197,7 +253,7 @@ function execInSandboxAsync(sessionId, command, options = {}) {
  * Output ditampung ke <workspace>/.bg/<jobId>.log dan exit code ke .exit,
  * keduanya terlihat dari host maupun container karena folder workspace ter-mount.
  */
-function startBackgroundInSandbox(sessionId, command, jobId) {
+function startBackgroundInSandbox(sessionId, command, jobId, options = {}) {
   const containerName = ensureSandbox(sessionId);
   const hostWorkspace = getSessionWorkspace(sessionId);
   const bgDir = path.join(hostWorkspace, ".bg");
@@ -208,8 +264,9 @@ function startBackgroundInSandbox(sessionId, command, jobId) {
   fs.writeFileSync(logPath, "", "utf-8");
   if (fs.existsSync(exitPath)) fs.unlinkSync(exitPath);
 
+  const niceArgs = options.lowPriority ? ["nice", "-n", "10", "ionice", "-c2", "-n7"] : [];
   const script = `{ ${command}\n} > /workspace/.bg/${jobId}.log 2>&1; echo $? > /workspace/.bg/${jobId}.exit`;
-  const child = spawn("docker", ["exec", "-i", "-w", "/workspace", containerName, "bash", "-lc", script], {
+  const child = spawn("docker", ["exec", "-i", "-w", "/workspace", containerName, ...niceArgs, "bash", "-lc", script], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"]
   });

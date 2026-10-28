@@ -85,6 +85,7 @@ async function runRender({
   let attachedAudioName = null;
   let audioPublicPath = null;
   let narrationSegments = 0;
+  let narrationTimings = null;
   let calculatedDuration = Number(durationSeconds) || 5;
 
   try {
@@ -95,6 +96,8 @@ async function runRender({
       console.log(`[Remotion TTS] Merangkai ${tts_lines.length} baris naskah menjadi satu voiceover...`);
       const narrRes = await generateNarration(tts_lines, { outputPath: audioPublicPath, voice: tts_voice });
       narrationSegments = narrRes.segments;
+      narrationTimings = narrRes.timings || [];
+      console.log(`[Remotion TTS] Voiceover ${narrRes.segments} segmen, ${narrRes.durationSec}s, ${narrationTimings.reduce((n, t) => n + t.words.length, 0)} word cue.`);
       if (narrRes.durationSec) {
         calculatedDuration = Math.max(calculatedDuration, narrRes.durationSec + 1);
       }
@@ -186,11 +189,11 @@ import { registerRoot, Composition, Audio, staticFile } from "remotion";
 import React from "react";
 import { ${compName} } from "./Component";
 
-export const VideoWrapper: React.FC = () => {
+export const VideoWrapper: React.FC<any> = (props) => {
   return (
     <>
       <Audio src={staticFile("${attachedAudioName}")} />
-      <${compName} />
+      <${compName} {...props} />
     </>
   );
 };
@@ -237,7 +240,15 @@ registerRoot(RemotionRoot);
     }
 
     // 3. Eksekusi rendering menggunakan Remotion CLI di dalam REMOTION_DIR
-    const cmd = `npx remotion render "${rootFile}" "${compId}" "${outputFilePath}" --gl=angle`;
+    // Timing voiceover dikirim sebagai --props (bukan inputProps di Composition; di Remotion 4
+    // inputProps pada Composition tidak diteruskan ke komponen saat render lewat CLI).
+    let propsArg = "";
+    if (narrationTimings) {
+      const propsFile = path.join(renderTempDir, "nroz-props.json");
+      fs.writeFileSync(propsFile, JSON.stringify({ nrozTimings: narrationTimings }), "utf-8");
+      propsArg = ` --props="${propsFile}"`;
+    }
+    const cmd = `npx remotion render "${rootFile}" "${compId}" "${outputFilePath}" --gl=angle${propsArg}`;
 
     console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
@@ -327,7 +338,7 @@ registerRoot(RemotionRoot);
  * render justru lebih lama dan berujung timeout.
  */
 
-const FRAME_SECONDS = 0.15; // terukur di VPS 2 vCPU, 1080x1920@30fps (bench: 0,148 s/frame) // terukur di 2 vCPU, 1080x1920, tanpa concurrency
+const FRAME_SECONDS = 0.15; // terukur di 2 vCPU, 1080x1920, satu render aktif (bench: 0,118-0,148 s/frame)
 const MAX_TRACKED_JOBS = 50;
 
 const renderJobs = new Map();
@@ -409,9 +420,30 @@ function listActiveJobs() {
   return [...renderJobs.values()].filter(j => j.status === "queued" || j.status === "rendering");
 }
 
+/**
+ * Status antrean render — dipakai agentTools untuk memberi prioritas CPU rendah
+ * pada perintah berat di sandbox selama video sedang dirender.
+ */
+function getRenderQueueStatus() {
+  const active = listActiveJobs();
+  const rendering = active.find((j) => j.status === "rendering");
+  if (!rendering) return { busy: false, queued: active.length };
+  const elapsedSec = (Date.now() - rendering.startedAt) / 1000;
+  return {
+    busy: true,
+    jobId: rendering.id,
+    duration: rendering.duration,
+    frames: rendering.frames,
+    elapsedSec: Math.round(elapsedSec),
+    remainingSec: Math.max(0, Math.round(rendering.estimateSec - elapsedSec)),
+    queued: active.length - 1
+  };
+}
+
 module.exports = {
   queueRender,
   onRenderComplete,
   getRenderJob,
-  listActiveJobs
+  listActiveJobs,
+  getRenderQueueStatus
 };

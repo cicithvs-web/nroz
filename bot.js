@@ -259,6 +259,11 @@ Pedoman & Fitur Unggulan:
     atau pakai \`tts_lines\` = [{"text":"baris 1","voice":"id-male"},{"text":"baris 2","voice":"id-female"}]
     kalau mau banyak suara/dialog. Durasi video otomatis mengikuti panjang voiceover (maksimum 900 detik),
     jadi JANGAN pernah membuat klip TTS satu per satu lewat run_command/run_code lalu menggabungkannya sendiri.
+  • SUBTITLE SINKRON: kalau kamu kirim \`tts_lines\`, komponen React-mu otomatis dapat prop \`nrozTimings\`:
+    \`[{ text, voice, start, end, words: [{ text, start, end }] }]\` dalam detik.
+    Contoh: \`export const Video = ({ nrozTimings = [] }) => { ... }\` lalu tampilkan kata ke-i ketika
+    \`frame / fps\` berada antara \`words[i].start\` dan \`words[i].end\`. Tidak perlu lagi memanggil edge-tts
+    sendiri di sandbox untuk mencari word boundary.
   • Kalau user minta video 5 menit: tulis naskah ±5 menit (sekitar 700-800 kata), panggil render_remotion_video
     SEKALI dengan naskah itu, kabari estimasi waktunya, dan akhiri jawaban. Render berjalan di antrean latar
     belakang; video dikirim otomatis ke chat ini saat selesai.
@@ -272,6 +277,10 @@ Pedoman & Fitur Unggulan:
   • Perintah yang makan waktu > 1 menit: jalankan dengan \`{"background": true}\` lalu baca hasilnya pakai
     \`check_command_output\`. DILARANG memakai \`sleep\` di dalam run_command untuk menunggu — itu kena timeout dan
     memboroskan langkah.
+  • Jangan menjalankan renderer sendiri di sandbox (remotion render, node render.mjs, ffmpeg encode, moviepy)
+    padahal \`render_remotion_video\` masih antre/berjalan — dua renderer di 2 vCPU saling memperlambat 3x.
+    Sistem akan menurunkan prioritas CPU perintah beratmu otomatis; lebih baik kerjakan bagian non-render
+    (tulis kode, siapkan aset) lalu biarkan antrean video selesai sendiri.
   
   Panduan Penulisan Kode React Component Remotion:
   • Gunakan hook animasi Remotion: \`useCurrentFrame()\`, \`useVideoConfig()\`, \`spring()\`, \`interpolate()\`.

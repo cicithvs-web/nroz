@@ -9,6 +9,37 @@ const fs = require("fs");
 
 const VOICE_ENV_DIR = "/opt/voice-env";
 const EDGE_TTS_BIN = path.join(VOICE_ENV_DIR, "bin", "edge-tts");
+const VOICE_PY = path.join(VOICE_ENV_DIR, "bin", "python");
+const NARRATION_SCRIPT = path.join(__dirname, "ttsNarration.py");
+
+/** Jalankan biner dengan argv array (tanpa shell, jadi tidak ada injeksi). */
+function runTool(cmd, args, { timeout = 120_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = (stderr || "").toString().trim() || err.message;
+        reject(new Error(`${path.basename(cmd)} gagal: ${detail.slice(-600)}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+/** Durasi file audio/video dalam detik memakai ffprobe. */
+async function probeDuration(file) {
+  try {
+    const out = await runTool("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      file
+    ], { timeout: 30_000 });
+    return parseFloat(out.trim()) || 0;
+  } catch (_) {
+    return 0;
+  }
+}
 
 let voiceEnvPromise = null;
 
@@ -97,15 +128,14 @@ async function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } =
 }
 
 /**
- * Generate satu track audio dari banyak baris naskah (multi-suara / dialog).
- * Setiap baris dibuat terpisah, lalu digabung ffmpeg menjadi satu file sehingga
- * video bernarasi panjang selesai dalam satu panggilan tool.
+ * Generate satu track audio dari banyak baris naskah (multi-suara / dialog) beserta
+ * timing per kata, dipakai untuk subtitle yang sinkron.
  *
  * @param {Array<string|{text: string, voice?: string}>} lines - Baris naskah
  * @param {Object} [options]
  * @param {string} [options.outputPath] - File MP3 hasil gabung
  * @param {string} [options.voice="id-ID-ArdiNeural"] - Suara default untuk baris tanpa voice
- * @returns {Promise<{ filePath: string, durationSec: number, segments: number }>}
+ * @returns {Promise<{ filePath: string, durationSec: number, segments: number, timings: Array }>}
  */
 async function generateNarration(lines, { outputPath, voice = "id-ID-ArdiNeural" } = {}) {
   if (!Array.isArray(lines) || lines.length === 0) {
@@ -114,51 +144,65 @@ async function generateNarration(lines, { outputPath, voice = "id-ID-ArdiNeural"
   await ensureVoiceEnv();
 
   const targetFile = outputPath || path.join("/tmp", `narration_${Date.now()}.mp3`);
-  const segDir = path.join("/tmp", `narr_${Date.now()}_segs`);
-  fs.mkdirSync(segDir, { recursive: true });
+  const workDir = path.join("/tmp", `narr_${Date.now()}_segs`);
+  fs.mkdirSync(workDir, { recursive: true });
 
-  const segmentFiles = [];
   try {
-    for (let i = 0; i < lines.length; i++) {
-      const entry = lines[i];
-      const text = typeof entry === "string" ? entry : entry && entry.text;
-      if (!text || !String(text).trim()) continue;
-      const segFile = path.join(segDir, `seg_${String(i).padStart(4, "0")}.mp3`);
-      const res = await generateSpeech(String(text), { voice: (entry && entry.voice) || voice, outputPath: segFile });
-      segmentFiles.push(segFile);
-      console.log(`[TTS Narration] Segmen ${segmentFiles.length}/${lines.length}: ${res.durationSec}s`);
-    }
+    const specPath = path.join(workDir, "spec.json");
+    const resultPath = path.join(workDir, "result.json");
+    const specLines = lines.map((line) => {
+      const raw = typeof line === "string" ? { text: line } : line || {};
+      return { text: String(raw.text || ""), voice: raw.voice ? AVAILABLE_VOICES[raw.voice] || raw.voice : undefined };
+    });
+    fs.writeFileSync(
+      specPath,
+      JSON.stringify({ lines: specLines, voice: AVAILABLE_VOICES[voice] || voice, seg_dir: workDir }),
+      "utf-8"
+    );
 
-    if (segmentFiles.length === 0) {
+    await runTool(VOICE_PY, [NARRATION_SCRIPT, specPath, resultPath], { timeout: 600_000 });
+    const segments = JSON.parse(fs.readFileSync(resultPath, "utf-8")).segments || [];
+    if (segments.length === 0) {
       throw new Error("Tidak ada baris naskah yang punya teks");
     }
 
-    const listFile = path.join(segDir, "concat.txt");
-    fs.writeFileSync(listFile, segmentFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n"), "utf-8");
+    const listFile = path.join(workDir, "concat.txt");
+    fs.writeFileSync(listFile, segments.map((s) => `file '${s.file.replace(/'/g, "'\\''")}'`).join("\n"), "utf-8");
 
-    await new Promise((resolve, reject) => {
-      execFile(
-        "ffmpeg",
-        ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-ar", "44100", "-ac", "2", "-b:a", "128k", targetFile],
-        { timeout: 300_000, maxBuffer: 8 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          if (err) reject(new Error(`FFmpeg concat gagal: ${(stderr || err.message).toString().slice(-500)}`));
-          else resolve();
-        }
-      );
-    });
+    await runTool(
+      "ffmpeg",
+      ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-ar", "44100", "-ac", "2", "-b:a", "128k", targetFile],
+      { timeout: 300_000 }
+    );
 
-    const durationSec = await new Promise((resolve) => {
-      execFile(
-        "ffprobe",
-        ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", targetFile],
-        (probeErr, probeOut) => resolve(probeErr ? 0 : Math.ceil(parseFloat(probeOut.trim()) || 0))
-      );
-    });
+    // Edge-tts memberi waktu per kata relatif ke awal tiap segmen, jadi offset kumulatif
+    // berdasarkan durasi nyata tiap segmen yang ditambahkan.
+    let cursor = 0;
+    const timings = [];
+    for (const seg of segments) {
+      const segDur = await probeDuration(seg.file);
+      timings.push({
+        text: seg.text,
+        voice: seg.voice,
+        start: Number(cursor.toFixed(3)),
+        end: Number((cursor + segDur).toFixed(3)),
+        words: (seg.words || []).map((w) => ({
+          text: w.text,
+          start: Number((cursor + w.start).toFixed(3)),
+          end: Number((cursor + w.end).toFixed(3))
+        }))
+      });
+      cursor += segDur;
+    }
 
-    return { filePath: targetFile, durationSec, segments: segmentFiles.length };
+    return {
+      filePath: targetFile,
+      durationSec: Math.ceil(cursor),
+      segments: segments.length,
+      timings
+    };
   } finally {
-    fs.rmSync(segDir, { recursive: true, force: true });
+    fs.rmSync(workDir, { recursive: true, force: true });
   }
 }
 

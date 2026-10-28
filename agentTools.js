@@ -23,7 +23,7 @@ const {
 } = require("./sandboxManager.js");
 const { startWebPreview, stopWebPreview, listActivePreviews } = require("./webPreviewManager.js");
 const { addReminder, addWatchdog, listTasks, removeTask } = require("./schedulerManager.js");
-const { queueRender } = require("./remotionManager.js");
+const { queueRender, getRenderQueueStatus } = require("./remotionManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -59,6 +59,15 @@ const toSandboxPath = (text, sessionId) => {
 /** Job run_command yang jalan di latar belakang: id -> { logPath, exitPath, startedAt, command } */
 const backgroundJobs = new Map();
 let bgCounter = 0;
+
+/** Perintah yang menyita CPU penuh — diberi prioritas rendah selama video sedang dirender. */
+const HEAVY_RENDER_RE = /(npx\s+remotion|remotion\s+render|render\.mjs|moviepy|manim|blender|headless[-_]shell|chrome-headless|ffmpeg\b.*(-c:v|libx264|libx265|--preset)|encod(e|ing))/i;
+
+/** Prioritas rendah kalau berat DAN antrean video sedang merender. */
+function lowPriorityFor(command) {
+  if (!HEAVY_RENDER_RE.test(command)) return false;
+  return getRenderQueueStatus().busy;
+}
 
 /**
  * Menerjemahkan path yang diberikan model ke path host:
@@ -584,7 +593,9 @@ const TOOL_DEFINITIONS = [
             type: "array",
             description:
               "Naskah multi-suara/dialog. Setiap item diucapkan terpisah lalu digabung otomatis menjadi satu voiceover MP3 " +
-              "dan durasi video mengikuti total panjangnya. Gunakan ini alih-alih membuat klip TTS manual di sandbox.",
+              "dan durasi video mengikuti total panjangnya. Komponen React-mu otomatis menerima prop " +
+              "`nrozTimings`: array [{text, voice, start, end, words:[{text,start,end]}]} dalam detik — pakai ini untuk " +
+              "subtitle/kinetic typography yang sinkron, bukan membuat klip TTS sendiri di sandbox.",
             items: {
               type: "object",
               properties: {
@@ -630,14 +641,21 @@ async function toolRunCommand({ command, cwd, sessionId, background }) {
   }
 
   const sandboxCommand = toSandboxPath(command, sessionId);
+  const lowPriority = lowPriorityFor(command);
+  const catatanPrioritas = lowPriority
+    ? (() => {
+        const q = getRenderQueueStatus();
+        return `⚡ Render video #${q.jobId} masih berjalan (sisa ±${Math.max(1, Math.round(q.remainingSec / 60))} menit) — perintah berat ini kujalankan dengan prioritas CPU rendah.\n`;
+      })()
+    : "";
 
   if (background) {
     const jobId = `bg${++bgCounter}`;
     try {
-      const { logPath, exitPath } = startBackgroundInSandbox(sessionId || "default", sandboxCommand, jobId);
+      const { logPath, exitPath } = startBackgroundInSandbox(sessionId || "default", sandboxCommand, jobId, { lowPriority });
       backgroundJobs.set(jobId, { logPath, exitPath, startedAt: Date.now(), command: toHostPathPreview(command) });
       return (
-        `🌙 Job ${jobId} dijalankan di latar belakang.\n` +
+        `${catatanPrioritas}🌙 Job ${jobId} dijalankan di latar belakang.\n` +
         `• Cek hasil dengan tool check_command_output({"job_id":"${jobId}"})\n` +
         `• Log: /workspace/.bg/${jobId}.log\n` +
         `Lanjutkan pekerjaan lain, jangan tidur dengan sleep.`
@@ -655,9 +673,10 @@ async function toolRunCommand({ command, cwd, sessionId, background }) {
     const output = await execInSandboxAsync(sessionId || "default", sandboxCommand, {
       timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
-      cwd: cwd || "/workspace"
+      cwd: cwd || "/workspace",
+      lowPriority
     });
-    return truncate(output || "(Perintah berhasil, tidak ada output)");
+    return `${catatanPrioritas}${truncate(output || "(Perintah berhasil, tidak ada output)")}`;
   } catch (err) {
     if (err.killed) {
       return (
@@ -668,8 +687,14 @@ async function toolRunCommand({ command, cwd, sessionId, background }) {
     const stderr = err.stderr ? err.stderr.toString() : "";
     const stdout = err.stdout ? err.stdout.toString() : "";
     const combined = (stdout + "\n" + stderr).trim();
-    return truncate(`❌ Perintah gagal (exit code ${err.status || "?"})\n${combined || err.message}`);
+    return truncate(`❌ Perintah gagal (exit code ${exitCodeOf(err)})\n${combined || err.message}`);
   }
+}
+
+/** Ambil exit code dari error child_process (execFile menaruh angka di err.code). */
+function exitCodeOf(err) {
+  const code = typeof err.code === "number" ? err.code : err.status;
+  return typeof code === "number" ? String(code) : "?";
 }
 
 /** Potongan pendek perintah untuk dict/job registry (bukan untuk dieksekusi). */
@@ -773,7 +798,7 @@ async function toolRunCode({ language, code, sessionId }) {
     const stderr = err.stderr ? err.stderr.toString() : "";
     const stdout = err.stdout ? err.stdout.toString() : "";
     return truncate(
-      `❌ Error saat menjalankan ${language}:\n${(stdout + "\n" + stderr).trim() || err.message}`
+      `❌ Error saat menjalankan ${language} (exit ${exitCodeOf(err)}):\n${(stdout + "\n" + stderr).trim() || err.message}`
     );
   }
 }
