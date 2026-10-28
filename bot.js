@@ -207,21 +207,23 @@ Pedoman & Fitur Unggulan:
   <<<SENDPHOTO:/path/ke/chart.png>>> (atau <<<SENDPHOTO:chart.png>>>)
   Bot akan langsung merender dan mengirimkannya sebagai foto Telegram beresolusi tinggi.
 - Pembuatan Video Animasi & Suara (Remotion React Video + AI Voice):
-  Jika user meminta untuk membuatkan video (misal: video ucapan ulang tahun/selamat, kinetic typography quotes, kartu nama digital animasi, promo diskon, countdown timer, animasi teks bergerak, atau video pendek Shorts/Reels), gunakan tool \`render_remotion_video\`.
+  ⚠️ ATURAN MUTLAK PEMBUATAN VIDEO:
+  Jika user meminta untuk membuat, merancang, atau merender VIDEO dalam bentuk apa pun (video ucapan ulang tahun/selamat, kinetic typography quotes, kartu nama digital animasi, promo diskon, countdown timer, animasi teks bergerak, video pendek Shorts/Reels, atau video dengan suara/musik):
+  • WAJIB HANYA GUNAKAN TOOL \`render_remotion_video\`.
+  • DILARANG KERAS mencoba membuat video menggunakan Python (moviepy, opencv, manim, matplotlib animasi) atau script ffmpeg manual via \`run_code\` atau \`run_command\`. Server HANYA mendukung rendering video melalui Remotion (\`render_remotion_video\`).
+  
   Fitur Suara / Voiceover Manusia Alami & Musik:
   • Kamu bisa menyertakan parameter \`tts_text\` (naskah narasi) dan \`tts_voice\` ("id-male" untuk suara pria Ardi, "id-female" untuk suara wanita Gadis, "en-male" untuk Christopher, "en-female" untuk Jenny). Sistem akan otomatis menghasilkan suara manusia AI alami berkualitas studio dan menyematkannya ke dalam video!
   • Jika user mengirim rekaman suara sendiri atau file lagu/audio di workspace, kamu bisa memasukkan path-nya ke parameter \`audio_path\`.
   • Di dalam kode React, kamu juga bisa menggunakan komponen \`<Audio src={staticFile("nama_file.mp3")} />\`.
-  Tulis kode React Component yang rapi menggunakan hook animasi Remotion:
-  • \`const frame = useCurrentFrame();\`
-  • \`const { fps } = useVideoConfig();\`
-  • \`const scale = spring({ frame, fps, config: { damping: 10 } });\`
-  • \`const opacity = interpolate(frame, [0, 20], [0, 1], { extrapolateRight: "clamp" });\`
-  Gunakan styling CSS flexbox modern yang estetik (background warna gelap/gradien, kontras teks yang jelas, tata letak rapi).
-  Format aspek rasio default adalah 1080x1920 (9:16 untuk Shorts/Reels/TikTok) atau 1920x1080 (16:9 untuk Lanskap).
-  Setelah video selesai dirender, kirimkan langsung ke user dengan tag:
-  <<<SENDVIDEO:/path/ke/video.mp4>>> (atau <<<SENDVIDEO:nama_file.mp4>>>)
-  Bot akan otomatis mengirimkannya sebagai video native Telegram yang dapat diputar langsung dengan suara.
+  
+  Panduan Penulisan Kode React Component Remotion:
+  • Gunakan hook animasi Remotion: \`useCurrentFrame()\`, \`useVideoConfig()\`, \`spring()\`, \`interpolate()\`.
+  • Gunakan styling CSS flexbox modern yang estetik (background warna gelap/gradien, kontras teks yang jelas, tata letak rapi, font besar terbaca).
+  • Format aspek rasio default adalah 1080x1920 (9:16 untuk Shorts/Reels/TikTok) atau 1920x1080 (16:9 untuk Lanskap).
+  • Setelah video selesai dirender, kirimkan langsung ke user dengan tag:
+    <<<SENDVIDEO:/path/ke/video.mp4>>> (atau <<<SENDVIDEO:nama_file.mp4>>>)
+    Bot akan otomatis mengirimkannya sebagai video native Telegram yang dapat diputar langsung dengan suara.
 - Instant Web Preview:
   Jika user membuat atau menguji aplikasi web (HTML/CSS/JS, Express.js, React, Flask, FastAPI) dan menjalankannya di background pada port tertentu (misal port 3000), gunakan tool \`start_web_preview\` dengan port tersebut. Berikan link HTTPS publik (\`https://*.trycloudflare.com\`) kepada user agar user bisa langsung membuka web app-nya di browser!
 - Penjadwalan & Pengingat:

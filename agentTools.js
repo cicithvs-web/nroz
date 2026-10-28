@@ -145,7 +145,8 @@ const TOOL_DEFINITIONS = [
       description:
         "Menjalankan perintah shell di dalam Persistent Docker Sandbox (Ubuntu Linux) terisolasi. " +
         "Kamu memiliki hak akses root penuh di dalam container sandbox kamu, bebas menginstall paket (apt-get, npm, pip), " +
-        "menjalankan script, kompilasi kode, atau mengelola proses tanpa batasan.",
+        "menjalankan script, kompilasi kode, atau mengelola proses tanpa batasan. " +
+        "PERINGATAN: DILARANG menggunakan tool ini untuk merender atau membuat video animasi. Untuk pembuatan video atau animasi dengan suara/narasi, SELALU gunakan tool 'render_remotion_video'.",
       parameters: {
         type: "object",
         properties: {
@@ -171,7 +172,8 @@ const TOOL_DEFINITIONS = [
       description:
         "Menjalankan potongan kode dan mengembalikan output-nya. " +
         "Mendukung JavaScript (Node.js), Python 3, dan Bash. " +
-        "Timeout 15 detik. Cocok untuk kalkulasi, pemrosesan data, atau testing kode.",
+        "Timeout 15 detik. Cocok untuk kalkulasi, pemrosesan data, atau testing kode. " +
+        "PERINGATAN: DILARANG menggunakan tool ini untuk membuat atau merender video animasi (misalnya script ffmpeg/moviepy/manim/opencv). Untuk pembuatan video, SELALU gunakan tool 'render_remotion_video'.",
       parameters: {
         type: "object",
         properties: {

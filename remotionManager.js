@@ -5,7 +5,8 @@
  * - Menerima kode React/Remotion dari AI Agent.
  * - Mendukung Voiceover Suara Manusia Alami (TTS via Edge Neural Voices).
  * - Mendukung audio kustom (BGM atau rekaman suara user).
- * - Memvalidasi dan membungkus kode ke dalam Root Composition Remotion.
+ * - Parser cerdas: mendukung export const, export function, export default, atau function murni.
+ * - Ekstraksi otomatis ID Komposisi (anti-error 'No composition found').
  * - Melakukan bundling & rendering ke video MP4 menggunakan Chrome Headless Shell & FFmpeg.
  * - Menyimpan video di folder workspace user dan mengembalikan path-nya.
  */
@@ -111,22 +112,41 @@ async function renderRemotionVideo({
     cleanCode = cleanCode.replace(/```\s*$/i, "");
 
     const hasRegisterRoot = /registerRoot\s*\(/i.test(cleanCode) && /<Composition/i.test(cleanCode);
+    let compId = "DynamicVideo";
 
     if (hasRegisterRoot) {
+      // Ekstrak ID komposisi dari kode pengguna jika ada
+      const matchId = cleanCode.match(/<Composition\s+[^>]*id=["']([^"']+)["']/i);
+      if (matchId && matchId[1]) {
+        compId = matchId[1];
+      } else {
+        compId = "MyVideo";
+      }
       fs.writeFileSync(rootFile, cleanCode, "utf-8");
     } else {
-      let wrappedComponentCode = cleanCode;
       let compName = "VideoComponent";
+      let wrappedComponentCode = cleanCode;
 
-      if (/export\s+const\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
-        const match = cleanCode.match(/export\s+const\s+([a-zA-Z0-9_]+)/);
+      if (/export\s+(?:const|function|var|let)\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
+        const match = cleanCode.match(/export\s+(?:const|function|var|let)\s+([a-zA-Z0-9_]+)/);
         compName = match[1];
       } else if (/export\s+default\s+function\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
         const match = cleanCode.match(/export\s+default\s+function\s+([a-zA-Z0-9_]+)/);
         compName = match[1];
+      } else if (/export\s+default\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
+        const match = cleanCode.match(/export\s+default\s+([a-zA-Z0-9_]+)/);
+        compName = match[1];
       } else if (/export\s+default/.test(cleanCode)) {
         wrappedComponentCode = cleanCode.replace(/export\s+default/, `export const ${compName} =`);
-      } else if (!/export\s+/.test(cleanCode)) {
+      } else if (/function\s+([A-Z][a-zA-Z0-9_]*)/.test(cleanCode)) {
+        const match = cleanCode.match(/function\s+([A-Z][a-zA-Z0-9_]*)/);
+        compName = match[1];
+        wrappedComponentCode = `${cleanCode}\nexport { ${compName} };`;
+      } else if (/const\s+([A-Z][a-zA-Z0-9_]*)\s*=/.test(cleanCode)) {
+        const match = cleanCode.match(/const\s+([A-Z][a-zA-Z0-9_]*)\s*=/);
+        compName = match[1];
+        wrappedComponentCode = `${cleanCode}\nexport { ${compName} };`;
+      } else {
         wrappedComponentCode = `${cleanCode}\nexport const ${compName} = typeof Main !== "undefined" ? Main : (typeof Video !== "undefined" ? Video : () => null);`;
       }
 
@@ -195,10 +215,9 @@ registerRoot(RemotionRoot);
     }
 
     // 3. Eksekusi rendering menggunakan Remotion CLI di dalam REMOTION_DIR
-    const compId = hasRegisterRoot ? "MyVideo" : "DynamicVideo";
     const cmd = `npx remotion render "${rootFile}" "${compId}" "${outputFilePath}" --gl=angle`;
 
-    console.log(`[Remotion] Starting render for session ${safeSession}: ${durSec}s (${totalFrames} frames)...`);
+    console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
 
     await new Promise((resolve, reject) => {
