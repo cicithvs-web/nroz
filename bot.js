@@ -30,11 +30,11 @@ const {
 } = require("./onlyxHelper.js");
 
 // Import modul agent tools untuk kemampuan AI Agent (tool-calling)
-const { TOOL_DEFINITIONS, executeTool } = require("./agentTools.js");
+const { TOOL_DEFINITIONS, executeTool, describeToolCall } = require("./agentTools.js");
 const { resetSandbox, getSandboxInfo } = require("./sandboxManager.js");
 const { initScheduler, listTasks, removeTask } = require("./schedulerManager.js");
 const { transcribeAudio } = require("./voiceManager.js");
-const { onRenderComplete } = require("./remotionManager.js");
+const { onRenderComplete, onRenderProgress, STAGE_LABEL } = require("./remotionManager.js");
 const { createShareLink } = require("./videoShareManager.js");
 
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : "7368157605";
@@ -45,6 +45,85 @@ const TELEGRAM_SEND_MAX_MB = Number(process.env.TELEGRAM_SEND_MAX_MB) || 48;
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 initScheduler(bot);
+
+/**
+ * PROGRES RENDER DI CHAT
+ *
+ * Render video makan menit, jadi user melihat satu pesan yang di-edit di tempat dengan
+ * persen, jumlah frame, dan sisa waktu perkiraan Remotion sendiri. Pesan dihapus begitu
+ * hasil final (video atau link) dikirim.
+ */
+const renderProgressState = new Map(); // jobId -> { messageId, stage, lastEdit }
+const PROGRESS_EDIT_MS = 20_000;
+
+function renderProgressBar(percent) {
+  const filled = Math.max(0, Math.min(10, Math.round((percent || 0) / 10)));
+  return "▓".repeat(filled) + "░".repeat(10 - filled);
+}
+
+function humanizeSeconds(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  if (s < 60) return `${s} detik`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} menit`;
+  return `${Math.floor(m / 60)} jam ${m % 60} menit`;
+}
+
+async function updateRenderProgress(job, progress) {
+  if (!job.chatId || process.env.RENDER_PROGRESS_MESSAGE === "off") return;
+
+  const st = renderProgressState.get(job.id) || {};
+  const stageChanged = st.stage !== progress.stage;
+  if (progress.stage === "done" && !st.messageId) return;
+  if (st.messageId && !stageChanged && Date.now() - st.lastEdit < PROGRESS_EDIT_MS) return;
+
+  const sisa = progress.remainingText
+    ? `sisa ±${progress.remainingText}`
+    : `sisa ±${humanizeSeconds((job.estimateSec || 0) - (progress.elapsedSec || 0))}`;
+
+  const text =
+    `🎬 Render #${job.id} — ${String(job.options?.title || "video").replace(/\s+/g, " ").slice(0, 40)}\n` +
+    `${renderProgressBar(progress.percent)} ${Math.round(progress.percent || 0)}%\n` +
+    `• ${STAGE_LABEL[progress.stage] || progress.stage}${progress.total ? ` · ${progress.rendered}/${progress.total} frame` : ""}\n` +
+    `• ${sisa} · sudah jalan ${humanizeSeconds(progress.elapsedSec)}\n` +
+    `• Video ${job.duration} detik — hasilnya dikirim otomatis ke chat ini`;
+
+  const sendOpts = job.threadId ? { message_thread_id: job.threadId } : {};
+  try {
+    if (st.messageId) {
+      await bot.editMessageText(text, { chat_id: job.chatId, message_id: st.messageId, ...sendOpts });
+    } else {
+      const sent = await bot.sendMessage(job.chatId, text, sendOpts);
+      st.messageId = sent.message_id;
+    }
+    st.stage = progress.stage;
+    st.lastEdit = Date.now();
+    renderProgressState.set(job.id, st);
+  } catch (err) {
+    // Kegagalan update progres tidak boleh menggagalkan render.
+    console.warn(`[Remotion Queue] Update progres job #${job.id} gagal: ${err.message}`);
+    if (/not found|not modified|too old|message can't be edited/i.test(err.message)) {
+      renderProgressState.delete(job.id);
+    }
+  }
+}
+
+async function clearRenderProgress(job) {
+  const st = renderProgressState.get(job.id);
+  renderProgressState.delete(job.id);
+  if (!st?.messageId) return;
+  try {
+    await bot.deleteMessage(job.chatId, st.messageId);
+  } catch (_) {
+    // Pesan mungkin sudah dihapus manual; tidak penting.
+  }
+}
+
+onRenderProgress((job, progress) => {
+  updateRenderProgress(job, progress).catch((err) =>
+    console.warn(`[Remotion Queue] Handler progres job #${job.id} error:`, err.message)
+  );
+});
 
 // Render video berjalan di latar belakang, jadi hasilnya dikirim ke chat
 // saat job selesai — bukan lewat jawaban AI yang sudah lama berakhir.
@@ -137,6 +216,8 @@ onRenderComplete(async (job) => {
     await deliverRenderResult(job);
   } catch (err) {
     console.error(`[Remotion Queue] Gagal mengirim hasil job #${job.id} ke chat ${job.chatId}:`, err.message);
+  } finally {
+    await clearRenderProgress(job);
   }
 });
 
@@ -934,6 +1015,10 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const MAX_TOOL_ROUNDS = 40;
   let currentMessages = [...messages];
   let finalAnswerReceived = false;
+  // Satu draft dipakai sepanjang giliran ini, jadi user melihat perintah yang sebenarnya
+  // dijalankan AI (bukan hanya nama tool) tanpa menambah pesan baru ke chat.
+  const turnDraftId = Math.floor(Math.random() * 2000000000) + 1;
+  let stepIndex = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     let isStreamSuccess = false;
@@ -1025,15 +1110,6 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       break;
     }
 
-    // Kirim draft yang menunjukkan penggunaan tool
-    if (isPrivate) {
-      const toolNames = toolCalls.map(tc => tc.function?.name).filter(Boolean).join(", ");
-      try {
-        const draftId = Math.floor(Math.random() * 2000000000) + 1;
-        await sendDraft(chatId, draftId, `🔧 Menggunakan tools: ${toolNames}...`, msg.message_thread_id);
-      } catch {}
-    }
-
     // Bangun pesan assistant untuk riwayat percakapan
     const assistantMsg = { role: "assistant", content: assistantContent || null };
     if (toolCalls.length > 0) {
@@ -1051,9 +1127,26 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
         fnArgs = {};
       }
 
+      stepIndex++;
+      const langkah = describeToolCall(fnName, fnArgs);
+      if (isPrivate) {
+        await sendDraft(chatId, turnDraftId, `⏳ [${stepIndex}/${MAX_TOOL_ROUNDS}] ${langkah}`, msg.message_thread_id);
+      }
+
       console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
       const result = await executeTool(fnName, fnArgs, { sessionId, chatId, threadId: msg.message_thread_id });
       console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
+
+      if (isPrivate) {
+        const garis = result.split("\n").find((l) => l.trim()) || "";
+        const tanda = garis.startsWith("❌") ? "❌" : "✅";
+        await sendDraft(
+          chatId,
+          turnDraftId,
+          `${tanda} [${stepIndex}/${MAX_TOOL_ROUNDS}] ${langkah} — ${garis.slice(0, 90)}`,
+          msg.message_thread_id
+        );
+      }
 
       currentMessages.push({
         role: "tool",

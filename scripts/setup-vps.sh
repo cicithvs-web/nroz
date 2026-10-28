@@ -38,7 +38,14 @@ warn() { printf '  \033[0;33mPERHATIAN\033[0m %s\n' "$*"; }
 
 MISSING=0
 check() { # check "label" "perintah-uji" ["cara-mengatasi"]
-  if eval "$2" >/dev/null 2>&1; then
+  local rc=0
+  # grep -q keluar begitu saja saat ada tanda cocok, sehingga perintah di depan pipeline
+  # (systemctl/ldconfig) kena SIGPIPE. Dengan pipefail itu terbaca sebagai kegagalan, jadi
+  # pipefail dimatikan khusus untuk uji ini.
+  set +o pipefail
+  eval "$2" >/dev/null 2>&1 || rc=$?
+  set -o pipefail
+  if [ "$rc" -eq 0 ]; then
     ok "$1"
   else
     MISSING=$((MISSING + 1))

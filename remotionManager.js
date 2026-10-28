@@ -11,7 +11,7 @@
  * - Render berjalan di antrean latar belakang (satu job aktif), video disimpan di workspace user.
  */
 
-const { exec, execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { generateSpeech, generateNarration } = require("./ttsManager.js");
@@ -23,6 +23,15 @@ const WORKSPACE_BASE = path.join(__dirname, "workspace");
 // Batas durasi render. Dulu dipatok 60 detik sehingga video panjang dipotong diam-diam;
 // sekarang 15 menit karena render berjalan di antrean latar belakang.
 const MAX_RENDER_SECONDS = Number(process.env.REMOTION_MAX_RENDER_SECONDS) || 900;
+
+// Label tahap render untuk pesan ke user dan laporan error; sumber tunggal agar konsisten.
+const STAGE_LABEL = {
+  preparing: "persiapan",
+  bundling: "menyusun bundel",
+  rendering: "merender frame",
+  stitching: "menggabungkan video",
+  done: "selesai"
+};
 
 function clampDurationFps(durationSeconds, fps) {
   const durSec = Math.max(1, Math.min(Number(durationSeconds) || 5, MAX_RENDER_SECONDS));
@@ -90,6 +99,7 @@ if (!fs.existsSync(REMOTION_PUBLIC)) {
  * @param {Array<{text: string, voice?: string}>} [options.tts_lines] - Naskah multi-suara; tiap baris dirender lalu digabung jadi satu voiceover
  * @param {string} [options.tts_voice="id-ID-ArdiNeural"] - Pilihan suara AI ("id-male", "id-female", "en-male", "en-female")
  * @param {string} [options.audio_path] - Path file audio MP3/WAV kustom yang ingin dimasukkan ke video
+ * @param {Function} [options.onProgress] - Dipakai internal antrean: dipanggil dengan { stage, percent, rendered, total, remainingText }
  * @returns {Promise<{ success: boolean, videoPath?: string, error?: string, duration?: number, sizeMb?: string, elapsedSec?: string }>}
  */
 async function runRender({
@@ -103,7 +113,8 @@ async function runRender({
   tts_text,
   tts_lines,
   tts_voice = "id-ID-ArdiNeural",
-  audio_path
+  audio_path,
+  onProgress
 }) {
   const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_\-]/g, "_");
   const userWs = path.join(WORKSPACE_BASE, safeSession);
@@ -306,13 +317,12 @@ registerRoot(RemotionRoot);
     // 3. Eksekusi rendering menggunakan Remotion CLI di dalam REMOTION_DIR
     // Timing voiceover dikirim sebagai --props (bukan inputProps di Composition; di Remotion 4
     // inputProps pada Composition tidak diteruskan ke komponen saat render lewat CLI).
-    let propsArg = "";
+    const cliArgs = ["remotion", "render", rootFile, compId, outputFilePath, "--gl=angle"];
     if (narrationTimings) {
       const propsFile = path.join(renderTempDir, "nroz-props.json");
       fs.writeFileSync(propsFile, JSON.stringify({ nrozTimings: narrationTimings }), "utf-8");
-      propsArg = ` --props="${propsFile}"`;
+      cliArgs.push(`--props=${propsFile}`);
     }
-    const cmd = `npx remotion render "${rootFile}" "${compId}" "${outputFilePath}" --gl=angle${propsArg}`;
 
     console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
@@ -324,38 +334,105 @@ registerRoot(RemotionRoot);
       Math.min(4 * 3600_000, Math.max(10 * 60_000, Math.round(totalFrames * FRAME_SECONDS * 3 * 1000)));
 
     await new Promise((resolve, reject) => {
-      exec(
-        cmd,
-        {
-          cwd: REMOTION_DIR,
-          timeout: RENDER_TIMEOUT_MS,
-          maxBuffer: 5 * 1024 * 1024
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            // Baris "npm warn"/"npm notice" selalu muncul di stderr dan bukan penyebab kegagalan,
-            // jadi dibuang agar pesan error tidak tertutup noise (mis. timeout yang sebenarnya).
-            const realStderr = (stderr || "")
-              .split("\n")
-              .filter(line => !/^npm (warn|notice)/.test(line.trim()))
-              .join("\n")
-              .trim();
+      const child = spawn("npx", cliArgs, { cwd: REMOTION_DIR });
+      let stderrAll = "";
+      let stdoutAll = "";
+      let pending = "";
+      let timedOut = false;
+      let lastProgress = null;
+      let emittedStage = null;
+      let emittedPercent = -1;
 
-            const parts = [];
-            if (error.killed || error.signal) {
-              parts.push(
-                `Waktu render melebihi batas ${RENDER_TIMEOUT_MS / 1000} detik lalu proses dihentikan. ` +
-                `Video panjang butuh waktu lebih lama dari batas ini.`
-              );
-            }
-            if (realStderr) parts.push(realStderr);
-            if (!parts.length && stdout.trim()) parts.push(stdout.trim());
-            if (!parts.includes(error.message)) parts.push(error.message);
-            return reject(new Error(parts.join("\n")));
-          }
-          resolve(stdout);
+      const emit = (progress) => {
+        lastProgress = progress;
+        // Remotion mencetak progress per frame; jangan bangunkan handler 9000 kali.
+        if (progress.stage === emittedStage && Math.abs(progress.percent - emittedPercent) < 1) return;
+        emittedStage = progress.stage;
+        emittedPercent = progress.percent;
+        try { onProgress?.(progress); } catch (_) {}
+      };
+
+      // Progress Remotion dicetak memakai \r, dan datang tidak selalu pas di akhir baris.
+      const handleLine = (line) => {
+        const text = line.trim();
+        if (!text) return;
+        const bundling = /^Bundling (\d+)%$/.exec(text);
+        if (bundling) {
+          emit({ stage: "bundling", percent: Math.min(5, Number(bundling[1]) * 0.05), rendered: 0, total: totalFrames });
+          return;
         }
-      );
+        const rendered = /^Rendered (\d+)\/(\d+)(?:, time remaining: (.+))?$/.exec(text);
+        if (rendered) {
+          const done = Number(rendered[1]);
+          const all = Number(rendered[2]) || totalFrames;
+          emit({
+            stage: "rendering",
+            percent: 5 + (done / all) * 87,
+            rendered: done,
+            total: all,
+            remainingText: rendered[3] || null
+          });
+          return;
+        }
+        const stitched = /^Stitched (\d+)\/(\d+)$/.exec(text);
+        if (stitched) {
+          emit({ stage: "stitching", percent: 92 + (Number(stitched[1]) / (Number(stitched[2]) || 1)) * 7, rendered: totalFrames, total: totalFrames });
+        }
+      };
+
+      const onData = (chunk, target) => {
+        const asString = chunk.toString();
+        if (target === "stderr") stderrAll = (stderrAll + asString).slice(-200_000);
+        else stdoutAll = (stdoutAll + asString).slice(-50_000);
+
+        pending += asString.replace(/\r/g, "\n");
+        const lines = pending.split("\n");
+        pending = lines.pop();
+        for (const line of lines) handleLine(line);
+      };
+
+      child.stdout.on("data", (c) => onData(c, "stdout"));
+      child.stderr.on("data", (c) => onData(c, "stderr"));
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, RENDER_TIMEOUT_MS);
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        if (pending.trim()) handleLine(pending);
+
+        if (code === 0 && !timedOut) return resolve();
+
+        // Baris "npm warn"/"npm notice" selalu muncul di stderr dan bukan penyebab kegagalan,
+        // jadi dibuang agar pesan error tidak tertutup noise.
+        const realStderr = stderrAll
+          .split("\n")
+          .filter((line) => !/^npm (warn|notice)/.test(line.trim()))
+          .join("\n")
+          .trim();
+
+        const parts = [];
+        if (timedOut) {
+          parts.push(
+            `Waktu render melebihi batas ${Math.round(RENDER_TIMEOUT_MS / 1000)} detik lalu proses dihentikan ` +
+            `(berhenti di tahap ${STAGE_LABEL[lastProgress?.stage] || "persiapan"}, ${lastProgress?.rendered ?? 0}/${totalFrames} frame). ` +
+            `Video sepanjang ini butuh lebih lama dari batasnya.`
+          );
+        } else if (signal) {
+          parts.push(`Proses render dihentikan oleh sistem (signal ${signal}).`);
+        }
+        if (realStderr) parts.push(realStderr.slice(-4000));
+        if (!parts.length && stdoutAll.trim()) parts.push(stdoutAll.trim().slice(-2000));
+        if (code !== null && !timedOut && !signal) parts.push(`Remotion CLI keluar dengan code ${code}.`);
+        reject(new Error(parts.join("\n") || "Render gagal tanpa keterangan."));
+      });
     });
 
     const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -434,6 +511,7 @@ function queueRender(options, meta = {}) {
     queuedAt: Date.now(),
     startedAt: null,
     finishedAt: null,
+    progress: null,
     result: null
   };
 
@@ -461,9 +539,29 @@ function queueRender(options, meta = {}) {
 async function runJob(job) {
   job.status = "rendering";
   job.startedAt = Date.now();
+  job.progress = { stage: "preparing", percent: 0, rendered: 0, total: job.frames };
   console.log(`[Remotion Queue] Job #${job.id} mulai: ${job.duration}s, ${job.frames} frame, estimasi ${Math.max(1, Math.round(job.estimateSec / 60))} menit.`);
+  notifyProgress(job, job.progress);
 
-  job.result = await runRender(job.options);
+  // onProgress menempel di options (bukan kode user), jadi aman dibuang sebelum hasil disimpan.
+  const { onProgress: _ignored, ...renderOptions } = job.options;
+  job.result = await runRender({
+    ...renderOptions,
+    onProgress: (progress) => {
+      job.progress = { ...progress, elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) };
+      notifyProgress(job, job.progress);
+    }
+  });
+  if (job.result.success) {
+    job.progress = {
+      stage: "done",
+      percent: 100,
+      rendered: job.frames,
+      total: job.frames,
+      elapsedSec: Math.round((Date.now() - job.startedAt) / 1000)
+    };
+    notifyProgress(job, job.progress);
+  }
   job.status = job.result.success ? "done" : "failed";
   job.finishedAt = Date.now();
 
@@ -482,6 +580,21 @@ async function runJob(job) {
 
 function onRenderComplete(handler) {
   completeHandler = handler;
+}
+
+let progressHandler = null;
+
+function onRenderProgress(handler) {
+  progressHandler = handler;
+}
+
+function notifyProgress(job, progress) {
+  if (!progressHandler) return;
+  try {
+    progressHandler(job, progress);
+  } catch (err) {
+    console.error(`[Remotion Queue] Progress handler job #${job.id} gagal:`, err.message);
+  }
 }
 
 function getRenderJob(id) {
@@ -504,10 +617,12 @@ function getRenderQueueStatus() {
   return {
     busy: true,
     jobId: rendering.id,
+    title: rendering.options?.title || "video",
     duration: rendering.duration,
     frames: rendering.frames,
     elapsedSec: Math.round(elapsedSec),
     remainingSec: Math.max(0, Math.round(rendering.estimateSec - elapsedSec)),
+    progress: rendering.progress,
     queued: active.length - 1
   };
 }
@@ -515,7 +630,9 @@ function getRenderQueueStatus() {
 module.exports = {
   queueRender,
   onRenderComplete,
+  onRenderProgress,
   getRenderJob,
   listActiveJobs,
-  getRenderQueueStatus
+  getRenderQueueStatus,
+  STAGE_LABEL
 };

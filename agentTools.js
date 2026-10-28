@@ -1344,6 +1344,8 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
     `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})${catatanNarasi}\n` +
     `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}${catatanAudio}\n\n` +
     `PENTING: Video akan DIKIRIM OTOMATIS oleh sistem ke chat ini saat render selesai.\n` +
+    `Selama rendering, sistem menampilkan satu pesan progres (persen, jumlah frame, sisa waktu) yang di-update sendiri — ` +
+    `bilang saja ke user bahwa progresnya bisa dipantau di chat, jangan membuat pesan progres sendiri.\n` +
     `Hasil ≤ 48 MB masuk sebagai video native; yang lebih besar dikirim otomatis sebagai link unduhan HTTPS — ` +
     `jadi JANGAN mengompres ulang, menurunkan bitrate, atau memecah video supaya muat 50 MB.\n` +
     `Jangan menunggu hasil, jangan render ulang kode yang sama, dan jangan pakai tag <<<SENDVIDEO>>>.\n` +
@@ -1376,6 +1378,75 @@ const TOOL_HANDLERS = {
   media_download: toolMediaDownload,
   render_remotion_video: toolRenderRemotionVideo,
 };
+
+/**
+ * Ringkasan satu baris yang aman ditampilkan ke user: bukan dump argumen, tapi apa yang
+ * sebenarnya sedang dikerjakan. Nilai yang terlihat seperti secret disamarkan.
+ */
+function describeToolCall(name, args = {}) {
+  // Draft Telegram dikirim tanpa parse_mode, jadi karakter asli (underscore nama file,
+  // tanda kutip, path) boleh dan justru harus ditampilkan apa adanya.
+  const oneLine = (text, max = 90, fallback = "...") => {
+    const bersih = String(text ?? "").replace(/\s+/g, " ").trim().slice(0, max).trim();
+    return bersih || fallback;
+  };
+
+  const maskSecret = (text) =>
+    oneLine(text, 4000)
+      .replace(/(["']?(api[_-]?key|token|secret|password|authorization)["']?)\s*[:=]\s*["']?[^\s,"'}]+/gi, "$1:***");
+
+  switch (name) {
+    case "run_command": {
+      const cmd = oneLine(maskSecret(args.command), 90, "perintah");
+      return `menjalankan \`${cmd}\`${args.background ? " (latar belakang)" : ""}`;
+    }
+    case "check_command_output":
+      return `mengecek output job ${oneLine(args.job_id, 20, "semua")}`;
+    case "run_code": {
+      const firstLine = oneLine(
+        String(args.code || "")
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l && !l.startsWith("//") && !l.startsWith("#") && !l.startsWith("/*")) || "",
+        70
+      );
+      return `menjalankan ${oneLine(args.language || "kode", 12)}: ${firstLine}`;
+    }
+    case "web_search":
+      return `mencari "${oneLine(args.query, 70)}"`;
+    case "read_url":
+      return `membaca ${oneLine(args.url, 70)}`;
+    case "http_request":
+      return `${oneLine((args.method || "GET").toUpperCase(), 8)} ${oneLine(args.url, 70)}`;
+    case "file_read":
+      return `membaca ${oneLine(path.basename(args.path || ""), 40)}`;
+    case "file_write":
+      return `menulis ${oneLine(path.basename(args.path || ""), 40)} (${Buffer.byteLength(String(args.content || ""))} byte)`;
+    case "file_list":
+      return `daftar isi ${oneLine(args.path || ".", 40)}`;
+    case "system_info":
+      return "mengecek kondisi server";
+    case "start_web_preview":
+      return `membuka preview web di port ${oneLine(args.port, 6)}`;
+    case "create_reminder":
+      return `menjadwalkan pengingat ${oneLine(args.minutes_from_now, 6)} menit lagi: ${oneLine(args.message, 50)}`;
+    case "create_watchdog":
+      return `memantau ${oneLine(args.url, 60)}`;
+    case "media_download":
+      return `mengunduh media dari ${oneLine(args.url, 70)}`;
+    case "render_remotion_video": {
+      const bagian = [];
+      if (args.title) bagian.push(oneLine(args.title, 30));
+      if (args.duration_seconds) bagian.push(`${args.duration_seconds}s`);
+      if (args.fps) bagian.push(`${args.fps}fps`);
+      if (args.tts_lines?.length) bagian.push(`${args.tts_lines.length} baris naskah`);
+      else if (args.tts_text) bagian.push(`${oneLine(args.tts_text, 24)}...`);
+      return `merender video ${bagian.join(" · ") || "(tanpa judul)"}`;
+    }
+    default:
+      return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
+  }
+}
 
 /**
  * Menjalankan tool berdasarkan nama, argumen, dan context (sessionId).
@@ -1422,4 +1493,5 @@ async function executeTool(name, args, context = {}) {
 module.exports = {
   TOOL_DEFINITIONS,
   executeTool,
+  describeToolCall,
 };
