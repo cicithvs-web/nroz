@@ -3,11 +3,41 @@
  * Menggunakan Microsoft Edge Neural TTS (Gratis, Kualitas Studio)
  */
 
-const { execFile } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-const EDGE_TTS_BIN = "/opt/voice-env/bin/edge-tts";
+const VOICE_ENV_DIR = "/opt/voice-env";
+const EDGE_TTS_BIN = path.join(VOICE_ENV_DIR, "bin", "edge-tts");
+
+let voiceEnvPromise = null;
+
+function ensureVoiceEnv() {
+  if (!voiceEnvPromise) {
+    voiceEnvPromise = new Promise((resolve, reject) => {
+      if (fs.existsSync(EDGE_TTS_BIN)) return resolve();
+      console.log(`[TTS] ${VOICE_ENV_DIR} belum ada, menyiapkan edge-tts secara otomatis...`);
+      try {
+        execFileSync("python3", ["-m", "venv", VOICE_ENV_DIR], { stdio: ["ignore", "pipe", "pipe"] });
+        execFileSync(path.join(VOICE_ENV_DIR, "bin", "pip"), ["install", "--quiet", "--disable-pip-version-check", "edge-tts"], {
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 300_000
+        });
+        if (!fs.existsSync(EDGE_TTS_BIN)) throw new Error("instalasi selesai tetapi biner edge-tts tidak ditemukan");
+        console.log(`[TTS] edge-tts siap di ${EDGE_TTS_BIN}`);
+        resolve();
+      } catch (err) {
+        const detail = (err.stderr && err.stderr.toString().trim()) || err.message;
+        reject(new Error(
+          `Gagal menyiapkan ${VOICE_ENV_DIR} otomatis: ${detail}\n` +
+          `Install manual: apt-get install -y python3-venv && python3 -m venv ${VOICE_ENV_DIR} && ${VOICE_ENV_DIR}/bin/pip install edge-tts`
+        ));
+      }
+    });
+    voiceEnvPromise.catch(() => { voiceEnvPromise = null; });
+  }
+  return voiceEnvPromise;
+}
 
 /**
  * Daftar suara yang didukung
@@ -27,12 +57,13 @@ const AVAILABLE_VOICES = {
  * @param {string} [options.outputPath] - Path output file MP3
  * @returns {Promise<{ filePath: string, durationSec: number }>}
  */
-function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } = {}) {
-  return new Promise((resolve, reject) => {
-    if (!text || !text.trim()) {
-      return reject(new Error("Teks tidak boleh kosong"));
-    }
+async function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } = {}) {
+  if (!text || !text.trim()) {
+    throw new Error("Teks tidak boleh kosong");
+  }
+  await ensureVoiceEnv();
 
+  return new Promise((resolve, reject) => {
     const selectedVoice = AVAILABLE_VOICES[voice] || voice || "id-ID-ArdiNeural";
     const targetFile = outputPath || path.join("/tmp", `tts_${Date.now()}.mp3`);
 
@@ -67,5 +98,6 @@ function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } = {}) {
 
 module.exports = {
   generateSpeech,
+  ensureVoiceEnv,
   AVAILABLE_VOICES
 };

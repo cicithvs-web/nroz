@@ -796,9 +796,10 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const isPrivate = msg.chat?.type === "private" || chatId > 0;
   let rawAnswer = "";
 
-  // Loop tool-calling: maksimal 10 iterasi untuk mencegah loop tak terbatas
-  const MAX_TOOL_ROUNDS = 10;
+  // Loop tool-calling: dibatasi 40 iterasi untuk mencegah loop tak terbatas
+  const MAX_TOOL_ROUNDS = 40;
   let currentMessages = [...messages];
+  let finalAnswerReceived = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     let isStreamSuccess = false;
@@ -886,6 +887,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
     // Jika tidak ada tool calls, ini adalah jawaban final
     if (!toolCalls || toolCalls.length === 0) {
       rawAnswer = assistantContent;
+      finalAnswerReceived = true;
       break;
     }
 
@@ -935,7 +937,14 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   // 3. Bersihkan jawaban dan kirim pesan permanen
   let answer = cleanAnswer(cleanFileTags(rawAnswer));
   if (!answer && rawAnswer) answer = rawAnswer;
-  if (!answer) answer = "(Tidak ada respon dari AI)";
+  if (!answer) {
+    if (finalAnswerReceived) {
+      answer = "(AI mengembalikan jawaban kosong)";
+    } else {
+      console.warn(`[Tool Loop] Batas ${MAX_TOOL_ROUNDS} ronde tool tercapai tanpa jawaban final.`);
+      answer = `⚠️ Batas ${MAX_TOOL_ROUNDS} langkah tool tercapai sebelum AI memberi jawaban final. Biasanya ada tool yang terus gagal — cek pm2 logs atau ulangi permintaan lebih spesifik.`;
+    }
+  }
 
   const sent = await sendLongMessage(chatId, answer, getSendOptions(msg));
   if (sent && sent.message_id) {

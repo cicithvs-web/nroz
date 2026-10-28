@@ -68,6 +68,39 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 - **FFmpeg**: Terpasang di host (`ffmpeg -version`)
 - **Python 3**: Untuk Whisper (`faster-whisper`) dan Edge TTS (`edge-tts`)
 
+#### Dependensi Sistem (WAJIB saat pindah ke server baru)
+
+Perangkat baru sering hanya punya Node + Docker, sementara fitur video/TTS butuh library sistem.
+Ini yang membuat render gagal dengan `error while running chrome-headless-shell: libnss3.so: cannot open shared object file`:
+
+```bash
+apt-get update
+
+# Library yang dibutuhkan Chrome headless milik Remotion (Debian 13 / trixie)
+apt-get install -y \
+  libnss3 libnspr4 libasound2t64 libatk1.0-0t64 \
+  libatk-bridge2.0-0t64 libatspi2.0-0t64 libxkbcommon0
+
+# ffmpeg + ffprobe (durasi audio/video) dan yt-dlp (media downloader)
+apt-get install -y ffmpeg yt-dlp
+
+# Preparasi venv Python; /opt/voice-env dibuat otomatis oleh ttsManager.js
+apt-get install -y python3-venv python3-pip
+```
+
+Di Ubuntu 22.04/24.04 pakai nama paket tanpa sufiks `t64`: `libasound2 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0`.
+
+`/opt/voice-env/bin/edge-tts` tidak perlu dibuat manual — saat TTS pertama dipakai, `ttsManager.js`
+membuat venv-nya dan memasang `edge-tts` otomatis. Kalau otomatisnya gagal, pesannya menampilkan
+perintah install manual yang bisa langsung ditempel.
+
+Verifikasi cepat setelah setup:
+
+```bash
+ffprobe -version | head -1 && yt-dlp --version
+node -e "require('./ttsManager').generateSpeech('Tes suara',{outputPath:'/tmp/tts.mp3'}).then(r=>console.log('TTS OK',r.filePath))"
+```
+
 ### 2. Konfigurasi Variabel Lingkungan
 Salin file `.env.example` ke `.env` dan isi token/API key kamu:
 ```bash
