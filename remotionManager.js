@@ -126,6 +126,7 @@ async function renderRemotionVideo({
     } else {
       let compName = "VideoComponent";
       let wrappedComponentCode = cleanCode;
+      const codeTail = cleanCode.trim();
 
       if (/export\s+(?:const|function|var|let)\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
         const match = cleanCode.match(/export\s+(?:const|function|var|let)\s+([a-zA-Z0-9_]+)/);
@@ -133,9 +134,10 @@ async function renderRemotionVideo({
       } else if (/export\s+default\s+function\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
         const match = cleanCode.match(/export\s+default\s+function\s+([a-zA-Z0-9_]+)/);
         compName = match[1];
-      } else if (/export\s+default\s+([a-zA-Z0-9_]+)/.test(cleanCode)) {
-        const match = cleanCode.match(/export\s+default\s+([a-zA-Z0-9_]+)/);
-        compName = match[1];
+        wrappedComponentCode = cleanCode.replace(/export\s+default\s+function/, "export function");
+      } else if (/export\s+default\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;?\s*$/.test(codeTail)) {
+        compName = codeTail.match(/export\s+default\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;?\s*$/)[1];
+        wrappedComponentCode = `${cleanCode}\nexport { ${compName} };`;
       } else if (/export\s+default/.test(cleanCode)) {
         wrappedComponentCode = cleanCode.replace(/export\s+default/, `export const ${compName} =`);
       } else if (/function\s+([A-Z][a-zA-Z0-9_]*)/.test(cleanCode)) {
