@@ -34,12 +34,52 @@ const { TOOL_DEFINITIONS, executeTool } = require("./agentTools.js");
 const { resetSandbox, getSandboxInfo } = require("./sandboxManager.js");
 const { initScheduler, listTasks, removeTask } = require("./schedulerManager.js");
 const { transcribeAudio } = require("./voiceManager.js");
+const { onRenderComplete } = require("./remotionManager.js");
 
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : "7368157605";
 const CONFIG_FILE = path.join(__dirname, "config.json");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 initScheduler(bot);
+
+// Render video berjalan di latar belakang, jadi hasilnya dikirim ke chat
+// saat job selesai — bukan lewat jawaban AI yang sudah lama berakhir.
+onRenderComplete(async (job) => {
+  const res = job.result || {};
+  if (!job.chatId) {
+    console.warn(`[Remotion Queue] Job #${job.id} selesai tapi tidak punya chatId, hasil tidak dikirim.`);
+    return;
+  }
+
+  const sendOpts = job.threadId ? { message_thread_id: job.threadId } : {};
+  try {
+    if (res.success && res.videoPath && fs.existsSync(res.videoPath)) {
+      await bot.sendVideo(
+        job.chatId,
+        res.videoPath,
+        {
+          caption:
+            `🎬 *Video Selesai Dirender* (job #${job.id})\n` +
+            `• File: \`${path.basename(res.videoPath)}\`\n` +
+            `• Durasi: ${res.duration} detik\n` +
+            `• Ukuran: ${res.sizeMb} MB\n` +
+            `• Waktu render: ${res.elapsedSec} detik`,
+          parse_mode: "Markdown",
+          supports_streaming: true,
+          ...sendOpts
+        }
+      );
+    } else {
+      await bot.sendMessage(
+        job.chatId,
+        `❌ Render video (job #${job.id}) gagal:\n${String(res.error || "penyebab tidak diketahui").slice(0, 800)}`,
+        sendOpts
+      );
+    }
+  } catch (err) {
+    console.error(`[Remotion Queue] Gagal mengirim hasil job #${job.id} ke chat ${job.chatId}:`, err.message);
+  }
+});
 
 let BOT_USERNAME = "NrozBot";
 bot.getMe().then((me) => {
@@ -221,9 +261,12 @@ Pedoman & Fitur Unggulan:
   • Gunakan hook animasi Remotion: \`useCurrentFrame()\`, \`useVideoConfig()\`, \`spring()\`, \`interpolate()\`.
   • Gunakan styling CSS flexbox modern yang estetik (background warna gelap/gradien, kontras teks yang jelas, tata letak rapi, font besar terbaca).
   • Format aspek rasio default adalah 1080x1920 (9:16 untuk Shorts/Reels/TikTok) atau 1920x1080 (16:9 untuk Lanskap).
-  • Setelah video selesai dirender, kirimkan langsung ke user dengan tag:
-    <<<SENDVIDEO:/path/ke/video.mp4>>> (atau <<<SENDVIDEO:nama_file.mp4>>>)
-    Bot akan otomatis mengirimkannya sebagai video native Telegram yang dapat diputar langsung dengan suara.
+  • Tool ini NON-BLOCKING: hasil pemanggilannya hanya informasi job (nomor, estimasi waktu).
+    Videonya dikirim OTOMATIS oleh bot ke chat ini saat render selesai, jadi cukup kabari user
+    bahwa videonya sedang dikerjakan, lalu akhiri jawabanmu.
+  • DILARANG memanggil \`render_remotion_video\` berulang untuk kode yang sama karena render
+    sudah berjalan di antrean. Jangan tempel tag \`<<<SENDVIDEO>>>\` untuk video yang file-nya
+    belum ada — tag itu hanya untuk video yang sudah pasti ada di workspace.
 - Instant Web Preview:
   Jika user membuat atau menguji aplikasi web (HTML/CSS/JS, Express.js, React, Flask, FastAPI) dan menjalankannya di background pada port tertentu (misal port 3000), gunakan tool \`start_web_preview\` dengan port tersebut. Berikan link HTTPS publik (\`https://*.trycloudflare.com\`) kepada user agar user bisa langsung membuka web app-nya di browser!
 - Penjadwalan & Pengingat:
@@ -918,7 +961,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       }
 
       console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
-      const result = await executeTool(fnName, fnArgs, { sessionId });
+      const result = await executeTool(fnName, fnArgs, { sessionId, chatId, threadId: msg.message_thread_id });
       console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
 
       currentMessages.push({

@@ -8,7 +8,7 @@
  * - Parser cerdas: mendukung export const, export function, export default, atau function murni.
  * - Ekstraksi otomatis ID Komposisi (anti-error 'No composition found').
  * - Melakukan bundling & rendering ke video MP4 menggunakan Chrome Headless Shell & FFmpeg.
- * - Menyimpan video di folder workspace user dan mengembalikan path-nya.
+ * - Render berjalan di antrean latar belakang (satu job aktif), video disimpan di workspace user.
  */
 
 const { exec, execFile } = require("child_process");
@@ -19,6 +19,16 @@ const { generateSpeech } = require("./ttsManager.js");
 const REMOTION_DIR = path.join(__dirname, "remotion-engine");
 const REMOTION_PUBLIC = path.join(REMOTION_DIR, "public");
 const WORKSPACE_BASE = path.join(__dirname, "workspace");
+
+// Batas durasi render. Dulu dipatok 60 detik sehingga video panjang dipotong diam-diam;
+// sekarang 15 menit karena render berjalan di antrean latar belakang.
+const MAX_RENDER_SECONDS = Number(process.env.REMOTION_MAX_RENDER_SECONDS) || 900;
+
+function clampDurationFps(durationSeconds, fps) {
+  const durSec = Math.max(1, Math.min(Number(durationSeconds) || 5, MAX_RENDER_SECONDS));
+  const safeFps = Math.max(15, Math.min(Number(fps) || 30, 60));
+  return { durSec, safeFps, frames: Math.round(durSec * safeFps) };
+}
 
 if (!fs.existsSync(REMOTION_PUBLIC)) {
   fs.mkdirSync(REMOTION_PUBLIC, { recursive: true });
@@ -39,7 +49,7 @@ if (!fs.existsSync(REMOTION_PUBLIC)) {
  * @param {string} [options.audio_path] - Path file audio MP3/WAV kustom yang ingin dimasukkan ke video
  * @returns {Promise<{ success: boolean, videoPath?: string, error?: string, duration?: number, sizeMb?: string, elapsedSec?: string }>}
  */
-async function renderRemotionVideo({
+async function runRender({
   code,
   durationSeconds = 5,
   fps = 30,
@@ -100,9 +110,7 @@ async function renderRemotionVideo({
       } catch (_) {}
     }
 
-    const durSec = Math.max(1, Math.min(calculatedDuration, 60)); // batas 1 - 60 detik
-    const safeFps = Math.max(15, Math.min(Number(fps) || 30, 60));
-    const totalFrames = Math.round(durSec * safeFps);
+    const { durSec, safeFps, frames: totalFrames } = clampDurationFps(calculatedDuration, fps);
     const w = Number(width) || 1080;
     const h = Number(height) || 1920;
 
@@ -222,18 +230,39 @@ registerRoot(RemotionRoot);
     console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
 
+    // Render berjalan di latar belakang, jadi batasnya longgar: video 5 menit
+    // (9000 frame) butuh ±17 menit di 2 vCPU. Override via REMOTION_RENDER_TIMEOUT_MS.
+    const RENDER_TIMEOUT_MS = Number(process.env.REMOTION_RENDER_TIMEOUT_MS) || 45 * 60_000;
+
     await new Promise((resolve, reject) => {
       exec(
         cmd,
         {
           cwd: REMOTION_DIR,
-          timeout: 180_000,
+          timeout: RENDER_TIMEOUT_MS,
           maxBuffer: 5 * 1024 * 1024
         },
         (error, stdout, stderr) => {
           if (error) {
-            const errDetails = stderr || stdout || error.message;
-            return reject(new Error(errDetails));
+            // Baris "npm warn"/"npm notice" selalu muncul di stderr dan bukan penyebab kegagalan,
+            // jadi dibuang agar pesan error tidak tertutup noise (mis. timeout yang sebenarnya).
+            const realStderr = (stderr || "")
+              .split("\n")
+              .filter(line => !/^npm (warn|notice)/.test(line.trim()))
+              .join("\n")
+              .trim();
+
+            const parts = [];
+            if (error.killed || error.signal) {
+              parts.push(
+                `Waktu render melebihi batas ${RENDER_TIMEOUT_MS / 1000} detik lalu proses dihentikan. ` +
+                `Video panjang butuh waktu lebih lama dari batas ini.`
+              );
+            }
+            if (realStderr) parts.push(realStderr);
+            if (!parts.length && stdout.trim()) parts.push(stdout.trim());
+            if (!parts.includes(error.message)) parts.push(error.message);
+            return reject(new Error(parts.join("\n")));
           }
           resolve(stdout);
         }
@@ -276,6 +305,96 @@ registerRoot(RemotionRoot);
   }
 }
 
+/**
+ * ANTREAN RENDER LATAR BELAKANG
+ *
+ * Render video tidak lagi memblokir percakapan: job masuk antrean, tool langsung
+ * balas "sedang merender", dan video dikirim saat selesai lewat onRenderComplete.
+ * Antreannya serial (satu render di satu waktu) karena CPU sharing membuat setiap
+ * render justru lebih lama dan berujung timeout.
+ */
+
+const FRAME_SECONDS = 0.12; // terukur di 2 vCPU, 1080x1920, tanpa concurrency
+const MAX_TRACKED_JOBS = 50;
+
+const renderJobs = new Map();
+let jobCounter = 0;
+let queueTail = Promise.resolve();
+let completeHandler = null;
+
+function queueRender(options, meta = {}) {
+  const { durSec, frames } = clampDurationFps(options.durationSeconds, options.fps);
+
+  const job = {
+    id: ++jobCounter,
+    options,
+    chatId: meta.chatId ?? null,
+    threadId: meta.threadId ?? null,
+    duration: durSec,
+    frames,
+    estimateSec: Math.round(frames * FRAME_SECONDS),
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    result: null
+  };
+
+  renderJobs.set(job.id, job);
+  for (const oldId of renderJobs.keys()) {
+    if (renderJobs.size <= MAX_TRACKED_JOBS) break;
+    if (renderJobs.get(oldId).status !== "queued" && renderJobs.get(oldId).status !== "rendering") {
+      renderJobs.delete(oldId);
+    }
+  }
+
+  const position = [...renderJobs.values()].filter(
+    (j) => j.id !== job.id && (j.status === "queued" || j.status === "rendering")
+  ).length + 1;
+
+  queueTail = queueTail.then(() => runJob(job)).catch((err) => {
+    console.error(`[Remotion Queue] Job #${job.id} runtuh:`, err.message);
+  });
+
+  return { job, position };
+}
+
+async function runJob(job) {
+  job.status = "rendering";
+  job.startedAt = Date.now();
+  console.log(`[Remotion Queue] Job #${job.id} mulai: ${job.duration}s, ${job.frames} frame, estimasi ${Math.max(1, Math.round(job.estimateSec / 60))} menit.`);
+
+  job.result = await runRender(job.options);
+  job.status = job.result.success ? "done" : "failed";
+  job.finishedAt = Date.now();
+
+  const elapsedSec = ((job.finishedAt - job.startedAt) / 1000).toFixed(1);
+  console.log(`[Remotion Queue] Job #${job.id} ${job.status} dalam ${elapsedSec}s.`);
+
+  if (completeHandler) {
+    try {
+      await completeHandler(job);
+    } catch (err) {
+      console.error(`[Remotion Queue] Callback job #${job.id} gagal:`, err.message);
+    }
+  }
+}
+
+function onRenderComplete(handler) {
+  completeHandler = handler;
+}
+
+function getRenderJob(id) {
+  return renderJobs.get(Number(id));
+}
+
+function listActiveJobs() {
+  return [...renderJobs.values()].filter(j => j.status === "queued" || j.status === "rendering");
+}
+
 module.exports = {
-  renderRemotionVideo
+  queueRender,
+  onRenderComplete,
+  getRenderJob,
+  listActiveJobs
 };

@@ -14,6 +14,10 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 
 2. **🎥 Remotion React Video Creator + AI Voiceover**:
    - Pembuatan video MP4 secara terprogram langsung dari kode React/TypeScript menggunakan **Remotion**.
+   - Render berjalan di **antrean latar belakang** (satu job aktif, sisanya antre). Bot langsung menjawab
+     `⏳ Render video #N dimulai` + estimasi waktu, lalu video **dikirim otomatis** ke chat saat selesai —
+     jadi permintaan video panjang tidak memblokir percakapan.
+   - Durasi maksimal 15 menit (900 detik), dapat diubah lewat `REMOTION_MAX_RENDER_SECONDS`.
    - Integrasi **Microsoft Edge Neural TTS** (`id-ID-ArdiNeural`, `id-ID-GadisNeural`, `en-US-ChristopherNeural`, `en-US-JennyNeural`) untuk narasi suara manusia alami berkualitas studio.
    - Otomatis dikirim ke Telegram sebagai video native (`bot.sendVideo`) dengan fitur streaming playback.
 
@@ -99,6 +103,23 @@ Verifikasi cepat setelah setup:
 ```bash
 ffprobe -version | head -1 && yt-dlp --version
 node -e "require('./ttsManager').generateSpeech('Tes suara',{outputPath:'/tmp/tts.mp3'}).then(r=>console.log('TTS OK',r.filePath))"
+```
+
+#### Swap untuk VPS kecil (render video panjang)
+
+Render video berdurasi beberapa menit (batas maksimum 15 menit, `REMOTION_MAX_RENDER_SECONDS`)
+butuh RAM di atas 2 GB dan berjalan di antrean latar belakang. VPS 2 GB rawan kena OOM saat Chrome
+headless merender ribuan frame, jadi tambahkan swap file:
+
+```bash
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
+  chmod 600 /swapfile
+  mkswap /swapfile
+fi
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw,pri=1 0 0' >> /etc/fstab
+swapon -a
+free -h   # kolom Swap harus tidak lagi 0B
 ```
 
 ### 2. Konfigurasi Variabel Lingkungan

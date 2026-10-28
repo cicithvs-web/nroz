@@ -19,7 +19,7 @@ const http = require("http");
 const { execInSandbox } = require("./sandboxManager.js");
 const { startWebPreview, stopWebPreview, listActivePreviews } = require("./webPreviewManager.js");
 const { addReminder, addWatchdog, listTasks, removeTask } = require("./schedulerManager.js");
-const { renderRemotionVideo } = require("./remotionManager.js");
+const { queueRender } = require("./remotionManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -458,7 +458,8 @@ const TOOL_DEFINITIONS = [
       description:
         "Membuat dan merender video animasi berkualitas tinggi (MP4) secara terprogram dari kode React/TypeScript menggunakan Remotion. " +
         "Mendukung animasi hook Remotion (useCurrentFrame, interpolate, spring, useVideoConfig, AbsoluteFill, Sequence), teks dinamis, bentuk, warna, dan styling CSS flexbox. " +
-        "Video hasil render disimpan di workspace pengguna.",
+        "TOOL INI BERSIFAT NON-BLOCKING: pangilan langsung mengembalikan nomor job dan render berjalan di latar belakang; " +
+        "video dikirim otomatis ke chat saat selesai. Cukup kabari user bahwa video sedang dikerjakan, lalu akhiri jawaban — jangan panggil tool ini dua kali untuk kode yang sama.",
       parameters: {
         type: "object",
         properties: {
@@ -470,7 +471,7 @@ const TOOL_DEFINITIONS = [
           },
           duration_seconds: {
             type: "number",
-            description: "Durasi video dalam detik (1 sampai 60 detik, default: 5 detik)",
+            description: "Durasi video dalam detik (default: 5). Boleh panjang untuk narasi lengkap; tiap 30 detik video ± 1 menit waktu render di server ini.",
           },
           fps: {
             type: "number",
@@ -1059,13 +1060,13 @@ async function toolMediaDownload({ url, format = "video", sessionId }) {
  * Tool: render_remotion_video
  * Membuat dan merender video animasi secara terprogram dari kode React/Remotion (Opsi B).
  */
-async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, height, title, sessionId, tts_text, tts_voice, audio_path }) {
+async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, height, title, sessionId, tts_text, tts_voice, audio_path, chatId, threadId }) {
   if (!code || typeof code !== "string") {
     return "❌ Parameter 'code' (kode React/Remotion) wajib diisi.";
   }
 
-  try {
-    const res = await renderRemotionVideo({
+  const { job, position } = queueRender(
+    {
       code,
       durationSeconds: duration_seconds,
       fps,
@@ -1075,25 +1076,23 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
       sessionId: sessionId || "default",
       tts_text,
       tts_voice,
-      audio_path,
-    });
+      audio_path
+    },
+    { chatId, threadId }
+  );
 
-    if (!res.success) {
-      return `❌ Gagal merender video Remotion:\n${res.error}`;
-    }
+  const estimasiMenit = Math.max(1, Math.round(job.estimateSec / 60));
+  const catatanAntrean = position > 1 ? `\n• Posisi antrean: ${position} (render sebelumnya masih berjalan)` : "";
 
-    return (
-      `🎬 Video Remotion Berhasil Dirender!\n` +
-      `• Path File: ${res.videoPath}\n` +
-      `• Durasi: ${res.duration} detik\n` +
-      `• Ukuran File: ${res.sizeMb} MB\n` +
-      `• Waktu Render: ${res.elapsedSec} detik\n\n` +
-      `PENTING: Segera kirimkan video ini kepada user di Telegram menggunakan tag berikut:\n` +
-      `<<<SENDVIDEO:${res.videoPath}>>>`
-    );
-  } catch (err) {
-    return `❌ Error saat proses rendering Remotion: ${err.message}`;
-  }
+  return (
+    `⏳ Render video #${job.id} dimulai di latar belakang.\n` +
+    `• Judul: ${title || "video"}\n` +
+    `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})\n` +
+    `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}\n\n` +
+    `PENTING: Video akan DIKIRIM OTOMATIS oleh sistem ke chat ini saat render selesai.\n` +
+    `Jangan menunggu hasil, jangan render ulang kode yang sama, dan jangan pakai tag <<<SENDVIDEO>>>.\n` +
+    `Cukup kabari user bahwa videonya sedang dikerjakan, lalu akhiri jawabanmu.`
+  );
 }
 
 // ============================================================
@@ -1142,6 +1141,12 @@ async function executeTool(name, args, context = {}) {
     const safeArgs = typeof args === "object" && args !== null ? { ...args } : {};
     if (context && context.sessionId) {
       safeArgs.sessionId = context.sessionId;
+    }
+    if (context && context.chatId !== undefined) {
+      safeArgs.chatId = context.chatId;
+    }
+    if (context && context.threadId !== undefined) {
+      safeArgs.threadId = context.threadId;
     }
 
     // Jalankan tool dan kembalikan hasilnya
