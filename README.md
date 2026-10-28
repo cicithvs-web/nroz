@@ -25,6 +25,11 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
    - Integrasi **Microsoft Edge Neural TTS** (`id-ID-ArdiNeural`, `id-ID-GadisNeural`, `en-US-ChristopherNeural`, `en-US-JennyNeural`) untuk narasi suara manusia alami berkualitas studio.
    - Naskah panjang dikirim dalam satu panggilan: `tts_text` (satu suara) atau `tts_lines` (banyak suara/dialog) —
      klip dibuat lalu digabung ffmpeg otomatis, durasi video mengikuti panjang voiceover.
+   - Bahan audio dari workspace dipakai langsung: `audio_path` menerima path sandbox (`/workspace/lagu.mp3`)
+     dan ditolak dengan pesan jelas kalau file tidak ada, sementara aset `staticFile("...")` di kode React disalin
+     otomatis dari folder sesi ke `remotion-engine/public` sebelum render (tidak ada lagi 404 di tengah render).
+   - Estimasi waktu memakai `REMOTION_FRAME_SECONDS` (bawaan 0,35 s/frame) — konservatif karena satu render aktif
+     di 2 vCPU terukur 0,13-0,56 s/frame tergantung beban server.
    - Otomatis dikirim ke Telegram sebagai video native (`bot.sendVideo`) dengan fitur streaming playback.
 
 3. **🎙️ Voice Note Transcriber (Whisper Local)**:

@@ -267,8 +267,12 @@ Pedoman & Fitur Unggulan:
   • Kalau user minta video 5 menit: tulis naskah ±5 menit (sekitar 700-800 kata), panggil render_remotion_video
     SEKALI dengan naskah itu, kabari estimasi waktunya, dan akhiri jawaban. Render berjalan di antrean latar
     belakang; video dikirim otomatis ke chat ini saat selesai.
-  • Jika user mengirim rekaman suara sendiri atau file lagu/audio di workspace, kamu bisa memasukkan path-nya ke parameter \`audio_path\`.
+  • Jika user mengirim rekaman suara sendiri atau file lagu/audio di workspace, kamu bisa memasukkan path-nya ke parameter \`audio_path\` (contoh: \`/workspace/musik.mp3\`). Tool langsung menolak kalau file tidak ada, jadi pastikan nama file persis.
   • Di dalam kode React, kamu juga bisa menggunakan komponen \`<Audio src={staticFile("nama_file.mp3")} />\`.
+    File dengan nama itu diambil otomatis dari folder kerjamu (\`/workspace\`) sebelum render — tidak perlu disalin manual,
+    dan kalau file memang tidak ada kamu diberi tahu sebelum render dimulai, bukan 404 di tengah jalan.
+  • Video panjang itu mahal: \`render_remotion_video\` di server ini ±0,35 detik per frame. 5 menit @30fps ≈ 53 menit,
+    @15fps ≈ 26 menit. Untuk video > 2 menit selalu kirim \`fps: 15\` dan sebutkan estimasi itu ke user.
 
   Aturan Path Sandbox (PENTING, sering bikin gagal):
   • \`run_command\` dan \`run_code\` jalan di container Docker yang HANYA melihat folder kerjamu sebagai \`/workspace\`.

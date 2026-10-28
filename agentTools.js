@@ -562,13 +562,13 @@ const TOOL_DEFINITIONS = [
           },
           duration_seconds: {
             type: "number",
-            description: "Durasi video dalam detik (default: 5). Boleh panjang untuk narasi lengkap; render di server ini ±0,15 detik per frame (5 menit @30fps ≈ 22 menit render).",
+            description: "Durasi video dalam detik (default: 5). Boleh panjang untuk narasi lengkap; render di server ini ±0,35 detik per frame (5 menit @30fps ≈ 53 menit render).",
           },
           fps: {
             type: "number",
             description:
-              "Frame per second (default: 30). Server ini merender ±0,15 detik per frame, jadi video panjang lebih cepat dengan fps rendah: " +
-              "5 menit @30fps ≈ 22 menit render, @15fps ≈ 11 menit.",
+              "Frame per second (default: 30). Server ini merender ±0,35 detik per frame, jadi video panjang lebih cepat dengan fps rendah: " +
+              "5 menit @30fps ≈ 53 menit render, @15fps ≈ 26 menit. Untuk video > 2 menit pakai fps 15.",
           },
           width: {
             type: "number",
@@ -616,7 +616,9 @@ const TOOL_DEFINITIONS = [
           },
           audio_path: {
             type: "string",
-            description: "Path file audio (MP3/WAV) di workspace server jika ingin memasukkan backsound atau suara rekaman user sendiri",
+            description:
+              "Path file audio (MP3/WAV) yang ingin dipakai sebagai backsound/suara user, misalnya /workspace/musik.mp3 " +
+              "(file yang kamu buat lewat run_command/file_write di folder kerjamu). Tool menolak lebih dulu kalau file tidak ada.",
           },
         },
         required: ["code"],
@@ -1298,6 +1300,23 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
     return "❌ Parameter 'tts_lines' harus berupa array baris naskah.";
   }
 
+  let catatanAudio = "";
+  if (audio_path) {
+    const hostAudio = toHostPath(String(audio_path).trim(), sessionId || "default");
+    if (!fs.existsSync(hostAudio) || !fs.statSync(hostAudio).isFile()) {
+      return (
+        `❌ audio_path "${audio_path}" tidak ditemukan.\n` +
+        `File harus ada di folder kerjamu: taruh sebagai /workspace/${path.basename(hostAudio)} ` +
+        `(run_command/file_write hanya menulis ke sandbox kalau path dimulai /workspace), lalu panggil render lagi.\n` +
+        `Kalau yang dimaksud adalah suara narasi, pakai tts_text atau tts_lines saja — sistem yang membuat audionya.`
+      );
+    }
+    if ((tts_text && String(tts_text).trim()) || (narration && narration.length)) {
+      catatanAudio = "\n• Catatan: audio_path diabaikan karena voiceover TTS dipakai; suara AI yang masuk ke video.";
+    }
+    audio_path = hostAudio;
+  }
+
   const { job, position } = queueRender(
     {
       code,
@@ -1323,7 +1342,7 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
     `⏳ Render video #${job.id} dimulai di latar belakang.\n` +
     `• Judul: ${title || "video"}\n` +
     `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})${catatanNarasi}\n` +
-    `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}\n\n` +
+    `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}${catatanAudio}\n\n` +
     `PENTING: Video akan DIKIRIM OTOMATIS oleh sistem ke chat ini saat render selesai.\n` +
     `Jangan menunggu hasil, jangan render ulang kode yang sama, dan jangan pakai tag <<<SENDVIDEO>>>.\n` +
     `Cukup kabari user bahwa videonya sedang dikerjakan, lalu akhiri jawabanmu.`

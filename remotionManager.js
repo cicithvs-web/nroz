@@ -30,6 +30,48 @@ function clampDurationFps(durationSeconds, fps) {
   return { durSec, safeFps, frames: Math.round(durSec * safeFps) };
 }
 
+/** /workspace/<file> = file di workspace sesi; tool lain sudah memetakan ini, render tidak boleh kalah. */
+function resolveWorkspacePath(p, userWs) {
+  const clean = String(p).trim();
+  if (clean === "/workspace" || clean.startsWith("/workspace/")) {
+    return path.join(userWs, clean.slice("/workspace".length));
+  }
+  return clean;
+}
+
+/**
+ * Server Remotion hanya melayani remotion-engine/public, jadi aset yang dibuat model
+ * di /workspace akan 404 di tengah render. Disalin ke public sebelum render dimulai.
+ * @returns {{copied: string[], missing: string[]}}
+ */
+function stageStaticAssets(code, userWs) {
+  const copied = [];
+  const missing = [];
+  const names = new Set();
+  const re = /staticFile\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+  let match;
+  while ((match = re.exec(code))) names.add(match[1]);
+
+  for (const rawName of names) {
+    const name = rawName.replace(/^\/+/, "");
+    if (!name || name.includes("..") || path.isAbsolute(name)) {
+      missing.push(rawName);
+      continue;
+    }
+    const dest = path.join(REMOTION_PUBLIC, name);
+    if (fs.existsSync(dest)) continue;
+    const src = path.join(userWs, name);
+    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+      copied.push(dest);
+    } else {
+      missing.push(rawName);
+    }
+  }
+  return { copied, missing };
+}
+
 if (!fs.existsSync(REMOTION_PUBLIC)) {
   fs.mkdirSync(REMOTION_PUBLIC, { recursive: true });
 }
@@ -86,6 +128,7 @@ async function runRender({
   let audioPublicPath = null;
   let narrationSegments = 0;
   let narrationTimings = null;
+  let stagedAssets = [];
   let calculatedDuration = Number(durationSeconds) || 5;
 
   try {
@@ -110,10 +153,17 @@ async function runRender({
         // Sesuaikan durasi video minimal sama dengan panjang audio
         calculatedDuration = Math.max(calculatedDuration, speechRes.durationSec + 1);
       }
-    } else if (audio_path && fs.existsSync(audio_path)) {
-      attachedAudioName = `audio_${timestamp}${path.extname(audio_path) || ".mp3"}`;
+    } else if (audio_path) {
+      const srcAudio = resolveWorkspacePath(audio_path, userWs);
+      if (!fs.existsSync(srcAudio) || !fs.statSync(srcAudio).isFile()) {
+        throw new Error(
+          `audio_path "${audio_path}" tidak ditemukan. Simpan filenya ke /workspace/${path.basename(srcAudio)} ` +
+          `lewat run_command/file_write dengan nama persis, atau biarkan sistem membuat suaranya lewat tts_text.`
+        );
+      }
+      attachedAudioName = `audio_${timestamp}${path.extname(srcAudio) || ".mp3"}`;
       audioPublicPath = path.join(REMOTION_PUBLIC, attachedAudioName);
-      fs.copyFileSync(audio_path, audioPublicPath);
+      fs.copyFileSync(srcAudio, audioPublicPath);
       // Ukur durasi audio menggunakan ffprobe
       try {
         const dur = await new Promise((res) => {
@@ -133,6 +183,20 @@ async function runRender({
     let cleanCode = (code || "").trim();
     cleanCode = cleanCode.replace(/^```(?:tsx|jsx|typescript|javascript|react)?\s*/i, "");
     cleanCode = cleanCode.replace(/```\s*$/i, "");
+
+    // 2b. Siapkan aset staticFile(...) dari workspace sesi + gagal cepat kalau ada yang hilang,
+    // supaya tidak berakhir sebagai 404 di tengah render.
+    const staged = stageStaticAssets(cleanCode, userWs);
+    stagedAssets = staged.copied;
+    if (staged.copied.length) {
+      console.log(`[Remotion Assets] ${staged.copied.length} file disalin dari workspace sesi ke public/.`);
+    }
+    if (staged.missing.length) {
+      throw new Error(
+        `staticFile ${staged.missing.map((n) => `"${n}"`).join(", ")} tidak ditemukan di public/ maupun /workspace/.\n` +
+        `Simpan file itu ke /workspace/ dengan nama persis, atau hilangkan pemanggilannya dari kode.`
+      );
+    }
 
     const hasRegisterRoot = /registerRoot\s*\(/i.test(cleanCode) && /<Composition/i.test(cleanCode);
     let compId = "DynamicVideo";
@@ -253,9 +317,11 @@ registerRoot(RemotionRoot);
     console.log(`[Remotion] Starting render for session ${safeSession} (comp: ${compId}): ${durSec}s (${totalFrames} frames)...`);
     const startTime = Date.now();
 
-    // Render berjalan di latar belakang, jadi batasnya longgar: video 5 menit
-    // (9000 frame) butuh ±17 menit di 2 vCPU. Override via REMOTION_RENDER_TIMEOUT_MS.
-    const RENDER_TIMEOUT_MS = Number(process.env.REMOTION_RENDER_TIMEOUT_MS) || 45 * 60_000;
+    // Render berjalan di latar belakang, jadi batasnya longgar dan ikut panjang video:
+    // 3x estimasi frame, minimal 10 menit, maksimal 4 jam. Override via REMOTION_RENDER_TIMEOUT_MS.
+    const RENDER_TIMEOUT_MS =
+      Number(process.env.REMOTION_RENDER_TIMEOUT_MS) ||
+      Math.min(4 * 3600_000, Math.max(10 * 60_000, Math.round(totalFrames * FRAME_SECONDS * 3 * 1000)));
 
     await new Promise((resolve, reject) => {
       exec(
@@ -325,6 +391,9 @@ registerRoot(RemotionRoot);
       if (audioPublicPath && fs.existsSync(audioPublicPath)) {
         fs.unlinkSync(audioPublicPath);
       }
+      for (const stagedFile of stagedAssets) {
+        try { fs.unlinkSync(stagedFile); } catch (_) {}
+      }
     } catch (_) {}
   }
 }
@@ -338,7 +407,10 @@ registerRoot(RemotionRoot);
  * render justru lebih lama dan berujung timeout.
  */
 
-const FRAME_SECONDS = 0.15; // terukur di 2 vCPU, 1080x1920, satu render aktif (bench: 0,118-0,148 s/frame)
+// Rata-rata jujur untuk menjangankan estimasi. Bench bersih pernah 0,12-0,15 s/frame, tapi
+// pengukuran nyata (28 Okt): 1080x1920 = 0,56 s/frame, 1920x1080 = 0,24-0,28 s/frame.
+// Lebih baik janji ke user terlalu lama daripada terlalu cepat.
+const FRAME_SECONDS = Number(process.env.REMOTION_FRAME_SECONDS) || 0.35;
 const MAX_TRACKED_JOBS = 50;
 
 const renderJobs = new Map();
