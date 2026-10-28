@@ -70,7 +70,7 @@ async function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } =
     execFile(
       EDGE_TTS_BIN,
       ["--voice", selectedVoice, "--text", text.trim(), "--write-media", targetFile],
-      { timeout: 30_000 },
+      { timeout: 180_000, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           return reject(new Error(stderr || error.message));
@@ -96,8 +96,75 @@ async function generateSpeech(text, { voice = "id-ID-ArdiNeural", outputPath } =
   });
 }
 
+/**
+ * Generate satu track audio dari banyak baris naskah (multi-suara / dialog).
+ * Setiap baris dibuat terpisah, lalu digabung ffmpeg menjadi satu file sehingga
+ * video bernarasi panjang selesai dalam satu panggilan tool.
+ *
+ * @param {Array<string|{text: string, voice?: string}>} lines - Baris naskah
+ * @param {Object} [options]
+ * @param {string} [options.outputPath] - File MP3 hasil gabung
+ * @param {string} [options.voice="id-ID-ArdiNeural"] - Suara default untuk baris tanpa voice
+ * @returns {Promise<{ filePath: string, durationSec: number, segments: number }>}
+ */
+async function generateNarration(lines, { outputPath, voice = "id-ID-ArdiNeural" } = {}) {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    throw new Error("Daftar naskah (tts_lines) kosong");
+  }
+  await ensureVoiceEnv();
+
+  const targetFile = outputPath || path.join("/tmp", `narration_${Date.now()}.mp3`);
+  const segDir = path.join("/tmp", `narr_${Date.now()}_segs`);
+  fs.mkdirSync(segDir, { recursive: true });
+
+  const segmentFiles = [];
+  try {
+    for (let i = 0; i < lines.length; i++) {
+      const entry = lines[i];
+      const text = typeof entry === "string" ? entry : entry && entry.text;
+      if (!text || !String(text).trim()) continue;
+      const segFile = path.join(segDir, `seg_${String(i).padStart(4, "0")}.mp3`);
+      const res = await generateSpeech(String(text), { voice: (entry && entry.voice) || voice, outputPath: segFile });
+      segmentFiles.push(segFile);
+      console.log(`[TTS Narration] Segmen ${segmentFiles.length}/${lines.length}: ${res.durationSec}s`);
+    }
+
+    if (segmentFiles.length === 0) {
+      throw new Error("Tidak ada baris naskah yang punya teks");
+    }
+
+    const listFile = path.join(segDir, "concat.txt");
+    fs.writeFileSync(listFile, segmentFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n"), "utf-8");
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        "ffmpeg",
+        ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-ar", "44100", "-ac", "2", "-b:a", "128k", targetFile],
+        { timeout: 300_000, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`FFmpeg concat gagal: ${(stderr || err.message).toString().slice(-500)}`));
+          else resolve();
+        }
+      );
+    });
+
+    const durationSec = await new Promise((resolve) => {
+      execFile(
+        "ffprobe",
+        ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", targetFile],
+        (probeErr, probeOut) => resolve(probeErr ? 0 : Math.ceil(parseFloat(probeOut.trim()) || 0))
+      );
+    });
+
+    return { filePath: targetFile, durationSec, segments: segmentFiles.length };
+  } finally {
+    fs.rmSync(segDir, { recursive: true, force: true });
+  }
+}
+
 module.exports = {
   generateSpeech,
+  generateNarration,
   ensureVoiceEnv,
   AVAILABLE_VOICES
 };

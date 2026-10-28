@@ -10,6 +10,10 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
    - Setiap pengguna/sesi memiliki container Docker Ubuntu 24.04 terisolasi (`nroz-sandbox-<sessionId>`).
    - Eksekusi perintah Linux (`run_command`) dan kode (`run_code`: Node.js, Python, Bash) bebas dan aman tanpa membahayakan host VPS.
    - Folder workspace otomatis ter-mount ke `/workspace` di dalam container.
+   - Path host (`/root/nroz/workspace/<chatId>/...`) dan path sandbox (`/workspace/...`) diterjemahkan otomatis,
+     jadi file yang ditulis `file_write` selalu terlihat oleh `run_command`.
+   - `run_command` dengan `"background": true` menjalankan perintah lama tanpa memblokir bot; hasilnya dibaca lewat
+     `check_command_output` (timeout biasa 120 detik, instalasi paket 300 detik).
    - Auto-clean file workspace berusia > 3 hari.
 
 2. **🎥 Remotion React Video Creator + AI Voiceover**:
@@ -19,6 +23,8 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
      jadi permintaan video panjang tidak memblokir percakapan.
    - Durasi maksimal 15 menit (900 detik), dapat diubah lewat `REMOTION_MAX_RENDER_SECONDS`.
    - Integrasi **Microsoft Edge Neural TTS** (`id-ID-ArdiNeural`, `id-ID-GadisNeural`, `en-US-ChristopherNeural`, `en-US-JennyNeural`) untuk narasi suara manusia alami berkualitas studio.
+   - Naskah panjang dikirim dalam satu panggilan: `tts_text` (satu suara) atau `tts_lines` (banyak suara/dialog) —
+     klip dibuat lalu digabung ffmpeg otomatis, durasi video mengikuti panjang voiceover.
    - Otomatis dikirim ke Telegram sebagai video native (`bot.sendVideo`) dengan fitur streaming playback.
 
 3. **🎙️ Voice Note Transcriber (Whisper Local)**:

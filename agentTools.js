@@ -16,7 +16,11 @@ const path = require("path");
 const os = require("os");
 const https = require("https");
 const http = require("http");
-const { execInSandbox } = require("./sandboxManager.js");
+const {
+  execInSandboxAsync,
+  startBackgroundInSandbox,
+  getSessionWorkspace,
+} = require("./sandboxManager.js");
 const { startWebPreview, stopWebPreview, listActivePreviews } = require("./webPreviewManager.js");
 const { addReminder, addWatchdog, listTasks, removeTask } = require("./schedulerManager.js");
 const { queueRender } = require("./remotionManager.js");
@@ -27,6 +31,45 @@ const { queueRender } = require("./remotionManager.js");
 
 /** Batas maksimum karakter output yang dikembalikan ke model */
 const MAX_OUTPUT = 4000;
+
+const WORKSPACE_BASE = path.join(__dirname, "workspace");
+
+/**
+ * Helper path — model sering mencampur path host (/root/nroz/workspace/<id>)
+ * dengan path sandbox (/workspace). Keduanya adalah folder yang sama, jadi
+ * diterjemahkan otomatis agar tidak ada lagi "file tidak ditemukan" palsu.
+ */
+const toHostPath = (p, sessionId) => {
+  if (typeof p !== "string" || !p) return p;
+  if (p === "/workspace" || p.startsWith("/workspace/")) {
+    return path.join(getSessionWorkspace(sessionId), p.slice("/workspace".length));
+  }
+  return p;
+};
+
+const toSandboxPath = (text, sessionId) => {
+  if (typeof text !== "string") return text;
+  const hostWs = getSessionWorkspace(sessionId);
+  let out = text.includes(hostWs) ? text.split(hostWs).join("/workspace") : text;
+  // Container cuma melihat satu folder workspace, jadi path session lain juga dipetakan ke /workspace
+  out = out.replace(new RegExp(`${WORKSPACE_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[A-Za-z0-9_\\-]+`, "g"), "/workspace");
+  return out;
+};
+
+/** Job run_command yang jalan di latar belakang: id -> { logPath, exitPath, startedAt, command } */
+const backgroundJobs = new Map();
+let bgCounter = 0;
+
+/**
+ * Menerjemahkan path yang diberikan model ke path host:
+ * /workspace/... -> folder session, dan path relatif -> di dalam folder session.
+ */
+function resolveFilePath(filePath, sessionId) {
+  const mapped = toHostPath(filePath, sessionId);
+  return path.isAbsolute(mapped)
+    ? path.resolve(mapped)
+    : path.resolve(getSessionWorkspace(sessionId), mapped);
+}
 
 /**
  * Memotong teks jika melebihi batas karakter.
@@ -146,7 +189,12 @@ const TOOL_DEFINITIONS = [
         "Menjalankan perintah shell di dalam Persistent Docker Sandbox (Ubuntu Linux) terisolasi. " +
         "Kamu memiliki hak akses root penuh di dalam container sandbox kamu, bebas menginstall paket (apt-get, npm, pip), " +
         "menjalankan script, kompilasi kode, atau mengelola proses tanpa batasan. " +
-        "PERINGATAN: DILARANG menggunakan tool ini untuk merender atau membuat video animasi. Untuk pembuatan video atau animasi dengan suara/narasi, SELALU gunakan tool 'render_remotion_video'.",
+        "PATH: folder kerja kamu di-mount sebagai /workspace. Path /workspace sama dengan folder yang dipakai file_write/file_read — " +
+        "jangan menulis ke /opt atau path host lain karena tidak akan terlihat oleh container. " +
+        "PERINTAH LAMA: set 'background': true (tanpa sleep!), lalu baca hasilnya dengan tool 'check_command_output'. " +
+        "Timeout perintah biasa 120 detik, instalasi paket 300 detik. " +
+        "PERINGATAN: DILARANG menggunakan tool ini untuk merender/membuat video animasi atau membuat klip TTS satu per satu. " +
+        "Untuk video dengan suara/narasi, SELALU gunakan satu panggilan tool 'render_remotion_video' dengan tts_text atau tts_lines.",
       parameters: {
         type: "object",
         properties: {
@@ -158,8 +206,36 @@ const TOOL_DEFINITIONS = [
             type: "string",
             description: "Direktori kerja opsional di dalam container (default: /workspace)",
           },
+          background: {
+            type: "boolean",
+            description:
+              "true = jalankan tanpa menunggu selesai (untuk render/encode/batch TTS/download panjang). " +
+              "Hasil dibaca nanti lewat check_command_output. Jangan pakai 'sleep' untuk menunggu.",
+          },
         },
         required: ["command"],
+      },
+    },
+  },
+
+  // --- a2) check_command_output ---
+  {
+    type: "function",
+    function: {
+      name: "check_command_output",
+      description:
+        "Membaca status dan output perintah yang dijalankan dengan run_command {\"background\": true}. " +
+        "Kosongkan job_id untuk melihat daftar semua job background. " +
+        "Jangan polling berulang-ulang — cek sekali setelah kamu menyelesaikan pekerjaan lain atau setelah user bertanya.",
+      parameters: {
+        type: "object",
+        properties: {
+          job_id: {
+            type: "string",
+            description: "ID job dari hasil run_command background, misal 'bg1'. Kosong untuk list semua job.",
+          },
+        },
+        required: [],
       },
     },
   },
@@ -172,8 +248,11 @@ const TOOL_DEFINITIONS = [
       description:
         "Menjalankan potongan kode dan mengembalikan output-nya. " +
         "Mendukung JavaScript (Node.js), Python 3, dan Bash. " +
-        "Timeout 15 detik. Cocok untuk kalkulasi, pemrosesan data, atau testing kode. " +
-        "PERINGATAN: DILARANG menggunakan tool ini untuk membuat atau merender video animasi (misalnya script ffmpeg/moviepy/manim/opencv). Untuk pembuatan video, SELALU gunakan tool 'render_remotion_video'.",
+        "Timeout 90 detik; kode yang lebih panjang jalankan lewat run_command dengan file + background:true. " +
+        "Kode dieksekusi di dalam sandbox Docker, jadi folder kerja hanya terlihat sebagai /workspace. " +
+        "PERINGATAN: DILARANG menggunakan tool ini untuk membuat/merender video animasi (ffmpeg/moviepy/manim/opencv) " +
+        "atau membuat klip TTS/audio per segmen. Untuk video bernarasi, gunakan SATU panggilan 'render_remotion_video' " +
+        "dengan tts_text (naskah utuh) atau tts_lines (banyak suara).",
       parameters: {
         type: "object",
         properties: {
@@ -458,6 +537,9 @@ const TOOL_DEFINITIONS = [
       description:
         "Membuat dan merender video animasi berkualitas tinggi (MP4) secara terprogram dari kode React/TypeScript menggunakan Remotion. " +
         "Mendukung animasi hook Remotion (useCurrentFrame, interpolate, spring, useVideoConfig, AbsoluteFill, Sequence), teks dinamis, bentuk, warna, dan styling CSS flexbox. " +
+        "VIDEO PANJANG / BERNARASI: cukup SATU panggilan — kirim seluruh naskah lewat tts_text (atau tts_lines untuk banyak suara). " +
+        "Durasi video otomatis mengikuti panjang voiceover sampai 900 detik, dan render dikerjakan di antrean latar belakang. " +
+        "Dilarang membuat klip TTS/audio/video per segmen memakai run_command/run_code lalu menggabungkannya sendiri. " +
         "TOOL INI BERSIFAT NON-BLOCKING: pangilan langsung mengembalikan nomor job dan render berjalan di latar belakang; " +
         "video dikirim otomatis ke chat saat selesai. Cukup kabari user bahwa video sedang dikerjakan, lalu akhiri jawaban — jangan panggil tool ini dua kali untuk kode yang sama.",
       parameters: {
@@ -471,11 +553,13 @@ const TOOL_DEFINITIONS = [
           },
           duration_seconds: {
             type: "number",
-            description: "Durasi video dalam detik (default: 5). Boleh panjang untuk narasi lengkap; tiap 30 detik video ± 1 menit waktu render di server ini.",
+            description: "Durasi video dalam detik (default: 5). Boleh panjang untuk narasi lengkap; render di server ini ±0,15 detik per frame (5 menit @30fps ≈ 22 menit render).",
           },
           fps: {
             type: "number",
-            description: "Frame per second (default: 30)",
+            description:
+              "Frame per second (default: 30). Server ini merender ±0,15 detik per frame, jadi video panjang lebih cepat dengan fps rendah: " +
+              "5 menit @30fps ≈ 22 menit render, @15fps ≈ 11 menit.",
           },
           width: {
             type: "number",
@@ -491,7 +575,28 @@ const TOOL_DEFINITIONS = [
           },
           tts_text: {
             type: "string",
-            description: "Naskah narasi / suara manusia yang ingin diucapkan oleh AI di video (Voiceover otomatis berkualitas studio)",
+            description:
+              "Naskah narasi lengkap yang diucapkan AI di video (satu suara). DURASI VIDEO OTOMATIS MENGIKUTI PANJANG NASKAH " +
+              "sampai maksimum 900 detik — jadi untuk video 5 menit, kirim seluruh naskah di sini dalam SATU panggilan. " +
+              "Jangan pecah naskah menjadi klip TTS kecil dengan run_command/run_code.",
+          },
+          tts_lines: {
+            type: "array",
+            description:
+              "Naskah multi-suara/dialog. Setiap item diucapkan terpisah lalu digabung otomatis menjadi satu voiceover MP3 " +
+              "dan durasi video mengikuti total panjangnya. Gunakan ini alih-alih membuat klip TTS manual di sandbox.",
+            items: {
+              type: "object",
+              properties: {
+                text: { type: "string", description: "Teks yang diucapkan pada baris ini" },
+                voice: {
+                  type: "string",
+                  description:
+                    "Suara untuk baris ini: 'id-male', 'id-female', 'en-male', 'en-female', atau nama edge-tts penuh seperti 'id-ID-GadisNeural'. Kosong = pakai tts_voice.",
+                },
+              },
+              required: ["text"],
+            },
           },
           tts_voice: {
             type: "string",
@@ -517,34 +622,113 @@ const TOOL_DEFINITIONS = [
  * Tool: run_command
  * Menjalankan perintah shell di dalam Persistent Docker Sandbox user terisolasi.
  * Bebas tanpa larangan perintah karena terisolasi 100% di dalam container Docker.
+ * background=true -> perintah dijalankan tanpa menunggu, cek hasil pakai check_command_output.
  */
-async function toolRunCommand({ command, cwd, sessionId }) {
+async function toolRunCommand({ command, cwd, sessionId, background }) {
   if (!command || typeof command !== "string") {
     return "❌ Parameter 'command' wajib berupa string.";
   }
 
-  // Berikan waktu ekstra (60 detik) untuk perintah instalasi package
+  const sandboxCommand = toSandboxPath(command, sessionId);
+
+  if (background) {
+    const jobId = `bg${++bgCounter}`;
+    try {
+      const { logPath, exitPath } = startBackgroundInSandbox(sessionId || "default", sandboxCommand, jobId);
+      backgroundJobs.set(jobId, { logPath, exitPath, startedAt: Date.now(), command: toHostPathPreview(command) });
+      return (
+        `🌙 Job ${jobId} dijalankan di latar belakang.\n` +
+        `• Cek hasil dengan tool check_command_output({"job_id":"${jobId}"})\n` +
+        `• Log: /workspace/.bg/${jobId}.log\n` +
+        `Lanjutkan pekerjaan lain, jangan tidur dengan sleep.`
+      );
+    } catch (err) {
+      return `❌ Gagal memulai job background: ${err.message}`;
+    }
+  }
+
+  // Perintah instalasi package dan batch TTS butuh waktu lama; jangan dipotong 30 detik.
   const isInstallCmd = /\b(apt-get|apt|npm|pip|pip3|cargo)\s+install\b/i.test(command);
-  const timeoutMs = isInstallCmd ? 60_000 : 30_000;
+  const timeoutMs = isInstallCmd ? 300_000 : 120_000;
 
   try {
-    const output = execInSandbox(sessionId || "default", command, {
+    const output = await execInSandboxAsync(sessionId || "default", sandboxCommand, {
       timeout: timeoutMs,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: 4 * 1024 * 1024,
       cwd: cwd || "/workspace"
     });
     return truncate(output || "(Perintah berhasil, tidak ada output)");
   } catch (err) {
     if (err.killed) {
-      return `⏱️ Perintah dihentikan karena melebihi timeout ${timeoutMs / 1000} detik.`;
+      return (
+        `⏱️ Perintah dihentikan karena melebihi timeout ${Math.round(timeoutMs / 1000)} detik.\n` +
+        `Untuk pekerjaan yang lebih lama, jalankan lagi dengan {"background": true} lalu cek lewat check_command_output.`
+      );
     }
     const stderr = err.stderr ? err.stderr.toString() : "";
     const stdout = err.stdout ? err.stdout.toString() : "";
     const combined = (stdout + "\n" + stderr).trim();
-    return truncate(
-      `❌ Perintah gagal (exit code ${err.status || "?"})\n${combined || err.message}`
-    );
+    return truncate(`❌ Perintah gagal (exit code ${err.status || "?"})\n${combined || err.message}`);
   }
+}
+
+/** Potongan pendek perintah untuk dict/job registry (bukan untuk dieksekusi). */
+function toHostPathPreview(command) {
+  const oneLine = String(command).replace(/\s+/g, " ").trim();
+  return oneLine.length > 120 ? `${oneLine.slice(0, 120)}…` : oneLine;
+}
+
+/** Ambil bagian akhir file tanpa membaca seluruhnya (log job background bisa besar). */
+function tailFile(file, maxBytes = 8192) {
+  try {
+    const stat = fs.statSync(file);
+    const len = Math.min(stat.size, maxBytes);
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, "r");
+    fs.readSync(fd, buf, 0, len, Math.max(0, stat.size - len));
+    fs.closeSync(fd);
+    return buf.toString("utf-8");
+  } catch (_) {
+    return "";
+  }
+}
+
+/**
+ * Tool: check_command_output
+ * Membaca status/output job run_command yang jalan di latar belakang.
+ */
+async function toolCheckCommandOutput({ job_id }) {
+  const summarize = (id, job) => {
+    const done = fs.existsSync(job.exitPath);
+    const code = done ? tailFile(job.exitPath, 16).trim() : null;
+    const state = !done ? "🌙 jalan" : code === "0" ? "✅ selesai" : `❌ exit ${code}`;
+    return `- ${id}: ${state} selama ${Math.round((Date.now() - job.startedAt) / 1000)}s | ${job.command}`;
+  };
+
+  if (!job_id) {
+    if (backgroundJobs.size === 0) return "Tidak ada job background yang pernah dijalankan di proses ini.";
+    return `Job background aktif:\n${[...backgroundJobs.entries()].map(([id, j]) => summarize(id, j)).join("\n")}`;
+  }
+
+  const job = backgroundJobs.get(String(job_id));
+  if (!job) {
+    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${[...backgroundJobs.keys()].join(", ") || "(kosong)"}`;
+  }
+
+  const finished = fs.existsSync(job.exitPath);
+  const exitCode = finished ? tailFile(job.exitPath, 16).trim() : null;
+  const log = tailFile(job.logPath).trim();
+  const header = !finished
+    ? `🌙 Job ${job_id} MASIH BERJALAN (${Math.round((Date.now() - job.startedAt) / 1000)} detik)`
+    : exitCode === "0"
+      ? `✅ Job ${job_id} selesai (exit 0)`
+      : `❌ Job ${job_id} selesai dengan error (exit ${exitCode})`;
+
+  return truncate(
+    `${header}\n• Perintah: ${job.command}\n` +
+    `• Output terakhir:\n${log || "(belum ada output)"}\n` +
+    (finished ? "" : "\nJangan cek berulang — lanjutkan pekerjaan lain dan cek lagi saat user bertanya.")
+  );
 }
 
 /**
@@ -571,16 +755,20 @@ async function toolRunCode({ language, code, sessionId }) {
     return `❌ Bahasa '${language}' tidak didukung. Pilih: javascript, python, bash.`;
   }
 
+  const sandboxCommand = toSandboxPath(cmd, sessionId);
   try {
-    const output = execInSandbox(sessionId || "default", cmd, {
-      timeout: 20_000,
-      maxBuffer: 1024 * 1024,
+    const output = await execInSandboxAsync(sessionId || "default", sandboxCommand, {
+      timeout: 90_000,
+      maxBuffer: 4 * 1024 * 1024,
       cwd: "/workspace"
     });
     return truncate(output || "(Kode berhasil dijalankan, tidak ada output)");
   } catch (err) {
     if (err.killed) {
-      return `⏱️ Eksekusi ${language} dihentikan karena melebihi timeout 20 detik.`;
+      return (
+        "⏱️ Eksekusi kode dihentikan karena melebihi timeout 90 detik.\n" +
+        "Untuk pekerjaan panjang, simpan skrip ke file lalu jalankan run_command dengan {\"background\": true}."
+      );
     }
     const stderr = err.stderr ? err.stderr.toString() : "";
     const stdout = err.stdout ? err.stdout.toString() : "";
@@ -776,12 +964,12 @@ async function toolSystemInfo() {
  * Tool: file_read
  * Membaca isi file dengan validasi keamanan.
  */
-async function toolFileRead({ path: filePath }) {
+async function toolFileRead({ path: filePath, sessionId }) {
   if (!filePath || typeof filePath !== "string") {
     return "❌ Parameter 'path' wajib berupa string.";
   }
 
-  const resolved = path.resolve(filePath);
+  const resolved = resolveFilePath(filePath, sessionId);
 
   // Cek apakah file sensitif
   if (isSensitiveFile(resolved)) {
@@ -815,7 +1003,7 @@ async function toolFileRead({ path: filePath }) {
  * Tool: file_write
  * Menulis konten ke file, membuat direktori induk otomatis.
  */
-async function toolFileWrite({ path: filePath, content }) {
+async function toolFileWrite({ path: filePath, content, sessionId }) {
   if (!filePath || typeof filePath !== "string") {
     return "❌ Parameter 'path' wajib berupa string.";
   }
@@ -823,7 +1011,7 @@ async function toolFileWrite({ path: filePath, content }) {
     return "❌ Parameter 'content' wajib diisi.";
   }
 
-  const resolved = path.resolve(filePath);
+  const resolved = resolveFilePath(filePath, sessionId);
 
   // Cek apakah target di direktori sistem
   if (isSystemDir(resolved)) {
@@ -839,7 +1027,15 @@ async function toolFileWrite({ path: filePath, content }) {
 
     fs.writeFileSync(resolved, content, "utf-8");
     const size = Buffer.byteLength(content, "utf-8");
-    return `✅ Berhasil menulis ke ${resolved} (${size} bytes)`;
+    const sessionWs = getSessionWorkspace(sessionId);
+    if (!resolved.startsWith(sessionWs + path.sep) && resolved !== sessionWs) {
+      return (
+        `✅ Berhasil menulis ke ${resolved} (${size} bytes)\n` +
+        `⚠️ File itu ada di host dan TIDAK terlihat oleh run_command — sandbox Docker hanya mount folder session sebagai /workspace. ` +
+        `Kalau file ini akan dipakai run_command/run_code, tulis ulang ke /workspace/${path.basename(resolved)}.`
+      );
+    }
+    return `✅ Berhasil menulis ke ${resolved} (${size} bytes) — dari sandbox terlihat sebagai ${toSandboxPath(resolved, sessionId)}`;
   } catch (err) {
     return `❌ Gagal menulis file: ${err.message}`;
   }
@@ -849,9 +1045,9 @@ async function toolFileWrite({ path: filePath, content }) {
  * Tool: file_list
  * Menampilkan daftar file di sebuah direktori.
  */
-async function toolFileList({ path: dirPath }) {
+async function toolFileList({ path: dirPath, sessionId }) {
   const target = dirPath || ".";
-  const resolved = path.resolve(target);
+  const resolved = resolveFilePath(target, sessionId);
 
   // Cek apakah target di direktori sistem
   if (isSystemDir(resolved)) {
@@ -1060,9 +1256,21 @@ async function toolMediaDownload({ url, format = "video", sessionId }) {
  * Tool: render_remotion_video
  * Membuat dan merender video animasi secara terprogram dari kode React/Remotion (Opsi B).
  */
-async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, height, title, sessionId, tts_text, tts_voice, audio_path, chatId, threadId }) {
+async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, height, title, sessionId, tts_text, tts_lines, tts_voice, audio_path, chatId, threadId }) {
   if (!code || typeof code !== "string") {
     return "❌ Parameter 'code' (kode React/Remotion) wajib diisi.";
+  }
+
+  let narration = tts_lines;
+  if (typeof narration === "string") {
+    try {
+      narration = JSON.parse(narration);
+    } catch (_) {
+      return "❌ Parameter 'tts_lines' tidak bisa dibaca. Kirim sebagai array objek: [{\"text\":\"...\",\"voice\":\"id-female\"}]";
+    }
+  }
+  if (narration && !Array.isArray(narration)) {
+    return "❌ Parameter 'tts_lines' harus berupa array baris naskah.";
   }
 
   const { job, position } = queueRender(
@@ -1075,19 +1283,21 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
       title,
       sessionId: sessionId || "default",
       tts_text,
+      tts_lines: narration,
       tts_voice,
       audio_path
     },
     { chatId, threadId }
   );
 
-  const estimasiMenit = Math.max(1, Math.round(job.estimateSec / 60));
+  const estimasiMenit = Math.max(1, Math.round((job.estimateSec + job.waitSec) / 60));
   const catatanAntrean = position > 1 ? `\n• Posisi antrean: ${position} (render sebelumnya masih berjalan)` : "";
+  const catatanNarasi = narration && narration.length ? `\n• Voiceover: ${narration.length} baris naskah, durasi video mengikuti panjang suara` : "";
 
   return (
     `⏳ Render video #${job.id} dimulai di latar belakang.\n` +
     `• Judul: ${title || "video"}\n` +
-    `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})\n` +
+    `• Durasi: ${job.duration} detik (${job.frames} frame${duration_seconds > job.duration ? `, diminta ${duration_seconds}s tapi dipangkas ke batas maksimum` : ""})${catatanNarasi}\n` +
     `• Estimasi selesai: ±${estimasiMenit} menit${catatanAntrean}\n\n` +
     `PENTING: Video akan DIKIRIM OTOMATIS oleh sistem ke chat ini saat render selesai.\n` +
     `Jangan menunggu hasil, jangan render ulang kode yang sama, dan jangan pakai tag <<<SENDVIDEO>>>.\n` +
@@ -1105,6 +1315,7 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
  */
 const TOOL_HANDLERS = {
   run_command: toolRunCommand,
+  check_command_output: toolCheckCommandOutput,
   run_code: toolRunCode,
   web_search: toolWebSearch,
   read_url: toolReadUrl,

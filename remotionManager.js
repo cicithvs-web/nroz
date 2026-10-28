@@ -14,7 +14,7 @@
 const { exec, execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { generateSpeech } = require("./ttsManager.js");
+const { generateSpeech, generateNarration } = require("./ttsManager.js");
 
 const REMOTION_DIR = path.join(__dirname, "remotion-engine");
 const REMOTION_PUBLIC = path.join(REMOTION_DIR, "public");
@@ -45,6 +45,7 @@ if (!fs.existsSync(REMOTION_PUBLIC)) {
  * @param {string} [options.title] - Judul / nama file video
  * @param {string} [options.sessionId="default"] - ID sesi user
  * @param {string} [options.tts_text] - Teks naskah suara manusia yang ingin diucapkan di video
+ * @param {Array<{text: string, voice?: string}>} [options.tts_lines] - Naskah multi-suara; tiap baris dirender lalu digabung jadi satu voiceover
  * @param {string} [options.tts_voice="id-ID-ArdiNeural"] - Pilihan suara AI ("id-male", "id-female", "en-male", "en-female")
  * @param {string} [options.audio_path] - Path file audio MP3/WAV kustom yang ingin dimasukkan ke video
  * @returns {Promise<{ success: boolean, videoPath?: string, error?: string, duration?: number, sizeMb?: string, elapsedSec?: string }>}
@@ -58,6 +59,7 @@ async function runRender({
   title,
   sessionId = "default",
   tts_text,
+  tts_lines,
   tts_voice = "id-ID-ArdiNeural",
   audio_path
 }) {
@@ -82,11 +84,21 @@ async function runRender({
 
   let attachedAudioName = null;
   let audioPublicPath = null;
+  let narrationSegments = 0;
   let calculatedDuration = Number(durationSeconds) || 5;
 
   try {
     // 1. Tangani Audio / Voiceover TTS jika diminta
-    if (tts_text && tts_text.trim()) {
+    if (Array.isArray(tts_lines) && tts_lines.length) {
+      attachedAudioName = `audio_${timestamp}.mp3`;
+      audioPublicPath = path.join(REMOTION_PUBLIC, attachedAudioName);
+      console.log(`[Remotion TTS] Merangkai ${tts_lines.length} baris naskah menjadi satu voiceover...`);
+      const narrRes = await generateNarration(tts_lines, { outputPath: audioPublicPath, voice: tts_voice });
+      narrationSegments = narrRes.segments;
+      if (narrRes.durationSec) {
+        calculatedDuration = Math.max(calculatedDuration, narrRes.durationSec + 1);
+      }
+    } else if (tts_text && tts_text.trim()) {
       attachedAudioName = `audio_${timestamp}.mp3`;
       audioPublicPath = path.join(REMOTION_PUBLIC, attachedAudioName);
       console.log(`[Remotion TTS] Menghasilkan suara untuk teks: "${tts_text.slice(0, 50)}..."`);
@@ -284,7 +296,8 @@ registerRoot(RemotionRoot);
       videoPath: outputFilePath,
       duration: durSec,
       sizeMb,
-      elapsedSec
+      elapsedSec,
+      segments: narrationSegments
     };
   } catch (err) {
     console.error("[Remotion Error]:", err.message);
@@ -314,7 +327,7 @@ registerRoot(RemotionRoot);
  * render justru lebih lama dan berujung timeout.
  */
 
-const FRAME_SECONDS = 0.12; // terukur di 2 vCPU, 1080x1920, tanpa concurrency
+const FRAME_SECONDS = 0.15; // terukur di VPS 2 vCPU, 1080x1920@30fps (bench: 0,148 s/frame) // terukur di 2 vCPU, 1080x1920, tanpa concurrency
 const MAX_TRACKED_JOBS = 50;
 
 const renderJobs = new Map();
@@ -332,6 +345,7 @@ function queueRender(options, meta = {}) {
     threadId: meta.threadId ?? null,
     duration: durSec,
     frames,
+    waitSec: 0,
     estimateSec: Math.round(frames * FRAME_SECONDS),
     status: "queued",
     queuedAt: Date.now(),
@@ -348,9 +362,11 @@ function queueRender(options, meta = {}) {
     }
   }
 
-  const position = [...renderJobs.values()].filter(
+  const activeEarlier = [...renderJobs.values()].filter(
     (j) => j.id !== job.id && (j.status === "queued" || j.status === "rendering")
-  ).length + 1;
+  );
+  const position = activeEarlier.length + 1;
+  job.waitSec = activeEarlier.reduce((sum, j) => sum + j.estimateSec, 0);
 
   queueTail = queueTail.then(() => runJob(job)).catch((err) => {
     console.error(`[Remotion Queue] Job #${job.id} runtuh:`, err.message);
@@ -369,7 +385,8 @@ async function runJob(job) {
   job.finishedAt = Date.now();
 
   const elapsedSec = ((job.finishedAt - job.startedAt) / 1000).toFixed(1);
-  console.log(`[Remotion Queue] Job #${job.id} ${job.status} dalam ${elapsedSec}s.`);
+  const perFrame = job.frames > 0 ? (elapsedSec / job.frames).toFixed(3) : "-";
+  console.log(`[Remotion Queue] Job #${job.id} ${job.status} dalam ${elapsedSec}s (${perFrame} s/frame).`);
 
   if (completeHandler) {
     try {
