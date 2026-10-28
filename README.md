@@ -75,6 +75,8 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── schedulerManager.js     # Penjadwal pengingat & watchdog web
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
 ├── onlyxHelper.js          # Helper database memori percakapan Onlyx DB
+├── videoShareManager.js    # Link unduhan untuk hasil render di atas batas upload bot
+├── scripts/setup-vps.sh    # Setup sekali jalan untuk server baru (+ mode --check)
 ├── .env.example            # Template variabel lingkungan
 └── package.json            # Dependensi Node.js
 ```
@@ -82,6 +84,33 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ---
 
 ## 🚀 Panduan Instalasi & Menjalankan
+
+### 0. Cara cepat (dianjurkan saat pindah server)
+
+Satu script menyiapkan semuanya dan bisa dijalankan ulang dengan aman — tiap langkah
+dilewati kalau sudah beres:
+
+```bash
+git clone https://github.com/cicithvs-web/nroz.git && cd nroz
+cp .env.example .env && nano .env        # isi BOT_TOKEN, API_KEY, BASE_URL, MODEL, ONLYX_DB_*
+sudo bash scripts/setup-vps.sh
+```
+
+Script memasang Node.js >= 18, Docker, ffmpeg/ffprobe, yt-dlp, library yang dibutuhkan
+Chrome Headless Shell, `cloudflared` (web preview + link unduhan video), swapfile untuk
+render video panjang, dependensi npm bot + Remotion, venv `edge-tts`, image sandbox
+Docker, lalu menjalankan bot di pm2 dan mengaktifkan auto-start saat reboot.
+
+Cek kondisi server tanpa mengubah apa pun:
+
+```bash
+bash scripts/setup-vps.sh --check
+```
+
+Opsi: `--skip-node`, `--skip-docker`, `--skip-npm`, `--skip-start`, `--swap-mb=4096`.
+
+Langkah manual di bawah tetap berlaku sebagai rujukan kalau script tidak cocok dengan
+kondisimu (misalnya distro non-Debian/Ubuntu).
 
 ### 1. Prasyarat
 - **Node.js**: >= 18 atau 20+
@@ -160,9 +189,10 @@ cd remotion-engine && npm install && npx remotion browser ensure && cd ..
 # Menjalankan langsung
 node bot.js
 
-# Atau menjalankan dengan PM2 (Background Daemon)
-pm2 start bot.js --name "nroz-ai-bot"
+# Atau dengan PM2 (nama app "nroz" — dipakai juga oleh scripts/setup-vps.sh --check)
+pm2 start bot.js --name nroz
 pm2 save
+pm2 startup systemd -u root --hp /root   # opsional: auto-start setelah reboot
 ```
 
 ---
