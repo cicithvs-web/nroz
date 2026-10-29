@@ -2066,7 +2066,18 @@ function getAllToolDefinitions() {
  */
 async function executeTool(name, args, context = {}) {
   try {
-    // Pastikan args berupa objek
+    // 1. Cek apakah ini tool dari MCP Server
+    if (mcpManager.hasMcpTool(name)) {
+      // PENTING: Tool MCP HANYA boleh menerima parameter murni dari model LLM (args).
+      // Jangan pernah mencampur objek context internal (seperti context.bot, context.client,
+      // onMediaSent, dll) ke dalam args, karena context.bot memiliki referensi melingkar (circular)
+      // yang memicu "TypeError: Converting circular structure to JSON" saat MCP SDK
+      // melakukan JSON.stringify untuk JSON-RPC stdio transport!
+      const mcpArgs = typeof args === "object" && args !== null ? { ...args } : {};
+      return await mcpManager.callMcpTool(name, mcpArgs, context);
+    }
+
+    // 2. Siapkan argumen untuk handler tool lokal bawaan
     const safeArgs = typeof args === "object" && args !== null ? { ...args } : {};
     if (context && context.sessionId) {
       safeArgs.sessionId = context.sessionId;
@@ -2093,12 +2104,7 @@ async function executeTool(name, args, context = {}) {
       safeArgs.onSubagentProgress = context.onSubagentProgress;
     }
 
-    // 1. Cek apakah ini tool dari MCP Server
-    if (mcpManager.hasMcpTool(name)) {
-      return await mcpManager.callMcpTool(name, safeArgs, context);
-    }
-
-    // 2. Cari handler tool lokal bawaan
+    // 3. Cari handler tool lokal bawaan
     const handler = TOOL_HANDLERS[name];
     if (!handler) {
       return `❌ Tool '${name}' tidak ditemukan. Tool yang tersedia: ${Object.keys(TOOL_HANDLERS).join(", ")}`;

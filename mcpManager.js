@@ -163,9 +163,19 @@ async function callMcpTool(name, args = {}, context = {}) {
   const { client, originalName, serverName } = reg;
 
   try {
+    // Sanitasi args: pastikan hanya field primitif/serializable yang diteruskan ke MCP transport
+    // (Abaikan referensi circular seperti bot, client, function callback jika tidak sengaja disertakan)
+    const cleanArgs = {};
+    if (typeof args === "object" && args !== null) {
+      for (const [k, v] of Object.entries(args)) {
+        if (k === "bot" || k === "client" || typeof v === "function") continue;
+        cleanArgs[k] = v;
+      }
+    }
+
     const result = await client.callTool({
       name: originalName,
-      arguments: args
+      arguments: cleanArgs
     });
 
     const parts = result.content || [];
