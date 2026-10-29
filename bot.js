@@ -36,6 +36,11 @@ const { initScheduler, listTasks, removeTask } = require("./schedulerManager.js"
 const { transcribeAudio } = require("./voiceManager.js");
 const { onRenderComplete, onRenderProgress, STAGE_LABEL } = require("./remotionManager.js");
 const { createShareLink } = require("./videoShareManager.js");
+const {
+  ensureWorkspaceStructure,
+  appendRawLog,
+  getInjectedMemoryContext
+} = require("./workspaceMemoryManager.js");
 
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : "7368157605";
 const CONFIG_FILE = path.join(__dirname, "config.json");
@@ -448,6 +453,15 @@ Pedoman & Fitur Unggulan:
   Gunakan tool \`media_download\` untuk unduh video/audio dari URL internet yang diberikan user. Setelah terunduh, sertakan tag <<<SENDFILE:...>>> agar file dikirim ke user.
 - Voice Note / Pesan Suara:
   User dapat berbicara langsung lewat voice note Telegram yang otomatis ditranskripsikan ke teks. Tanggapi dengan ramah dan kontekstual.
+- Struktur Workspace & Manajemen Memori AI:
+  Folder kerjamu (/workspace) terorganisir rapi dengan zona:
+  • /workspace/uploads/ : Berisi semua file/dokumen/foto mentah kiriman user. Bersifat referensi asli.
+  • /workspace/work/    : Tempat utama kamu ngoding, install dependensi, uji kode, dan jalankan server/script.
+  • /workspace/artifacts/ : Tempat menyimpan hasil jadi/final (video MP4, ZIP project siap kirim).
+  • /workspace/.memory/ : Pusat memori cerdas kamu:
+    - Gunakan tool \`record_decision\` setiap kali user memilih atau menyetujui sebuah opsi (misal: "User memilih opsi B", "User minta pakai SQLite bukan PostgreSQL"). Ini akan selalu kamu ingat di pesan berikutnya!
+    - Gunakan tool \`update_project_context\` setelah kamu membuat file, menjalankan service/server, atau merubah state proyek, agar kamu selalu tahu apa yang sedang dikerjakan.
+    - Gunakan tool \`search_raw_memory\` HANYA jika user merujuk kembali detail obrolan masa lalu yang tidak ada di layar chat aktif saat ini.
 
 Kemampuan Tambahan Membuat File Baru:
 Jika user meminta untuk membuatkan file baru atau file ZIP dari awal:
@@ -462,9 +476,16 @@ Jika ingin menentukan nama file ZIP tertentu (misal: project.zip), sertakan:
 Format Tabel & Penyajian Data:
 Jika user meminta perbandingan, jadwal, daftar harga, spesifikasi, atau data terstruktur, selalu sajikan dalam format Markdown Table standar dengan header dan pemisah kolom. Telegram akan otomatis merendernya menjadi widget tabel native yang rapi.`;
 
-function buildMessagesWithSystem(historyMessages) {
+function buildMessagesWithSystem(historyMessages, sessionId = null) {
+  let systemContent = SYSTEM_PROMPT;
+  if (sessionId) {
+    const memoryInject = getInjectedMemoryContext(sessionId);
+    if (memoryInject) {
+      systemContent += `\n\n=== MEMORI PROYEK & KEPUTUSAN TERKINI ===\n${memoryInject}`;
+    }
+  }
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemContent },
     ...historyMessages
   ];
 }
@@ -1176,8 +1197,10 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const sent = await sendLongMessage(chatId, answer, getSendOptions(msg));
   if (sent && sent.message_id) {
     await saveMemory(sessionId, "assistant", answer, sent.message_id);
+    appendRawLog(sessionId, "assistant", answer, { messageId: sent.message_id });
   } else {
     await saveMemory(sessionId, "assistant", answer);
+    appendRawLog(sessionId, "assistant", answer);
   }
 
   // 4. Otomatis buat & kirim file atau ZIP jika diminta
@@ -1977,11 +2000,12 @@ bot.on("message", async (msg) => {
     }
 
     await saveMemory(sessionId, "user", userText, msg.message_id);
+    appendRawLog(sessionId, "user", userText, { messageId: msg.message_id });
 
     await executeAICompletionAndReply({
       msg,
       sessionId,
-      messages: buildMessagesWithSystem(await getHistoryForAI(sessionId, 6)),
+      messages: buildMessagesWithSystem(await getHistoryForAI(sessionId, 12), sessionId),
       userPromptForFiles: userText,
       typing
     });
@@ -2027,19 +2051,19 @@ bot.on("photo", async (msg) => {
     const base64 = bufferData.toString("base64");
     const prompt = (msg.caption || "").trim();
 
-    // Simpan fisik foto ke folder workspace server user
-    const workspaceDir = getChatWorkspace(sessionId);
+    // Simpan fisik foto ke folder uploads workspace user
+    const ws = ensureWorkspaceStructure(sessionId);
     const photoName = `photo_${Date.now()}.jpg`;
-    const savedFilePath = path.join(workspaceDir, photoName);
+    const savedFilePath = path.join(ws.uploadsDir, photoName);
     fs.writeFileSync(savedFilePath, bufferData);
     const fileSizeKb = (bufferData.length / 1024).toFixed(1);
 
     const userTextPrompt = 
       `🖼️ [Foto Diterima]\n` +
-      `• Disimpan di server: \`${savedFilePath}\` (${fileSizeKb} KB)\n` +
-      `• Folder workspace: \`${workspaceDir}\`\n` +
+      `• Disimpan di server: \`uploads/${photoName}\` (path host: \`${savedFilePath}\`, ${fileSizeKb} KB)\n` +
+      `• Path sandbox container: \`/workspace/uploads/${photoName}\`\n` +
       (prompt ? `• Pesan user: ${prompt}\n` : "") +
-      `\nKamu bisa melihat gambar secara visual (Vision) dan jika user meminta manipulasi gambar (resize, crop, OCR, convert, edit), kamu bisa memproses file tersebut menggunakan script/tools di server.`;
+      `\nKamu bisa melihat gambar secara visual (Vision). Jika user meminta manipulasi gambar (resize, crop, OCR, convert, edit), olah gambar ini dan letakkan hasilnya di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
 
     const currentMessage = [
       {
@@ -2051,13 +2075,14 @@ bot.on("photo", async (msg) => {
       }
     ];
 
-    await saveMemory(sessionId, "user", `[Kirim Foto]: ${prompt || "(tanpa caption)"} (disimpan di ${savedFilePath})`);
+    await saveMemory(sessionId, "user", `[Kirim Foto]: ${prompt || "(tanpa caption)"} (disimpan di uploads/${photoName})`);
+    appendRawLog(sessionId, "user", `[Kirim Foto]: ${prompt || "(tanpa caption)"} (uploads/${photoName})`, { messageId: msg.message_id });
 
-    const currentHistory = await getHistoryForAI(sessionId, 6);
+    const currentHistory = await getHistoryForAI(sessionId, 12);
     await executeAICompletionAndReply({
       msg,
       sessionId,
-      messages: buildMessagesWithSystem([...currentHistory, ...currentMessage]),
+      messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
       userPromptForFiles: prompt,
       typing
     });
@@ -2102,9 +2127,9 @@ bot.on("document", async (msg) => {
     const rawFileName = msg.document.file_name || `file_${Date.now()}`;
     const safeName = sanitizePath(rawFileName).replace(/[\/\\]/g, "_") || `file_${Date.now()}`;
     
-    // 1. Simpan file secara fisik ke workspace server user
-    const workspaceDir = getChatWorkspace(sessionId);
-    const savedFilePath = path.join(workspaceDir, safeName);
+    // 1. Simpan file secara fisik ke uploads/ di workspace server user
+    const ws = ensureWorkspaceStructure(sessionId);
+    const savedFilePath = path.join(ws.uploadsDir, safeName);
     fs.writeFileSync(savedFilePath, bufferData);
     
     const fileSizeKb = (bufferData.length / 1024).toFixed(1);
@@ -2117,21 +2142,23 @@ bot.on("document", async (msg) => {
       userPrompt = 
         `📦 [File ZIP Diterima]\n` +
         `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-        `• Lokasi di server: \`${savedFilePath}\`\n` +
-        `• Folder workspace: \`${workspaceDir}\`\n` +
+        `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+        `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+        `• Folder kerja sandbox: \`/workspace/work/\`\n` +
         `• Instruksi user: ${prompt || "Periksa dan kelola isi ZIP ini."}\n\n` +
-        `Instruksi AI Agent: File ZIP telah tersimpan di workspace server kamu. ` +
-        `Gunakan tool \`run_command\` untuk mengekstraknya (misal: \`unzip -o "${savedFilePath}" -d "${workspaceDir}/extracted"\`), ` +
-        `lalu periksa daftar filenya dengan \`file_list\`, baca isinya dengan \`file_read\`, jalankan pengujian kode, atau lakukan perbaikan sesuai permintaan user. ` +
-        `Jika user meminta file hasil editan dikirim balik, gunakan tag <<<SENDFILE:/path/file>>> atau buat ZIP baru.`;
+        `Instruksi AI Agent: File ZIP mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
+        `Ekstrak ke folder kerja (contoh: \`unzip -o "/workspace/uploads/${safeName}" -d "/workspace/work"\`), ` +
+        `lalu periksa daftar filenya dengan \`file_list\`, baca isinya dengan \`file_read\`, jalankan pengujian kode di \`/workspace/work\`, ` +
+        `dan jika ada file output jadi letakkan di \`/workspace/artifacts/\`.`;
     } else if ([".js", ".ts", ".jsx", ".tsx", ".py", ".sh", ".json", ".html", ".css", ".txt", ".md", ".sql", ".yaml", ".yml"].includes(ext)) {
       userPrompt = 
         `📄 [File Kode/Teks Diterima]\n` +
         `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-        `• Lokasi di server: \`${savedFilePath}\`\n` +
-        `• Folder workspace: \`${workspaceDir}\`\n` +
+        `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+        `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
         `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
-        `Instruksi AI Agent: File telah disimpan di workspace server. Kamu bisa membaca isinya dengan \`file_read\`, mengeditnya dengan \`file_write\`, atau langsung mengetes/menjalankannya dengan \`run_command\` atau \`run_code\`.`;
+        `Instruksi AI Agent: File mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
+        `Jika ingin mengedit, menyalin, atau mengujinya, gunakan folder \`/workspace/work/\` atau baca dengan \`file_read\`.`;
     } else if (ext === ".pdf" || ext === ".docx") {
       let extractedSnippet = "";
       try {
@@ -2149,23 +2176,24 @@ bot.on("document", async (msg) => {
       userPrompt = 
         `📑 [Dokumen Diterima]\n` +
         `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-        `• Lokasi di server: \`${savedFilePath}\`\n` +
-        `• Folder workspace: \`${workspaceDir}\`\n` +
+        `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+        `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
         `• Instruksi user: ${prompt || "Baca dan ringkas dokumen ini."}\n` +
         (extractedSnippet ? `\n[Cuplikan Isi Teks Dokumen]:\n${extractedSnippet}\n` : "") +
-        `\nInstruksi AI Agent: File dokumen utuh tersimpan di server. Kamu bisa menganalisis teks di atas atau memproses file fisiknya.`;
+        `\nInstruksi AI Agent: File dokumen utuh tersimpan di \`/workspace/uploads/${safeName}\`.`;
     } else if ([".jpg", ".jpeg", ".png", ".webp"].includes(ext)) {
       const mime = ext === ".png" ? "image/png" : 
                    ext === ".webp" ? "image/webp" : "image/jpeg";
       
       const userTextPrompt = 
         `🖼️ [Gambar HD Diterima]\n` +
-        `• Disimpan di server: \`${savedFilePath}\` (${fileSizeKb} KB)\n` +
-        `• Folder workspace: \`${workspaceDir}\`\n` +
+        `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`, ${fileSizeKb} KB)\n` +
+        `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
         (prompt ? `• Instruksi user: ${prompt}\n` : "") +
-        `\nKamu bisa melihat gambar secara visual (Vision) dan memproses file fisiknya di server jika diperlukan.`;
+        `\nKamu bisa melihat gambar secara visual (Vision). Hasil olahan simpan di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
 
-      await saveMemory(sessionId, "user", `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: ${savedFilePath})`);
+      await saveMemory(sessionId, "user", `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`);
+      appendRawLog(sessionId, "user", `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`, { messageId: msg.message_id });
       
       const currentMessage = [
         {
@@ -2177,11 +2205,11 @@ bot.on("document", async (msg) => {
         }
       ];
 
-      const currentHistory = await getHistoryForAI(sessionId, 6);
+      const currentHistory = await getHistoryForAI(sessionId, 12);
       await executeAICompletionAndReply({
         msg,
         sessionId,
-        messages: buildMessagesWithSystem([...currentHistory, ...currentMessage]),
+        messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
         userPromptForFiles: prompt,
         typing
       });
@@ -2190,23 +2218,24 @@ bot.on("document", async (msg) => {
       userPrompt = 
         `📁 [File Diterima]\n` +
         `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-        `• Lokasi di server: \`${savedFilePath}\`\n` +
-        `• Folder workspace: \`${workspaceDir}\`\n` +
+        `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+        `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
         `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
-        `Instruksi AI Agent: File telah disimpan di workspace server. Kamu bisa memeriksanya dengan tools sistem yang sesuai di Linux VPS.`;
+        `Instruksi AI Agent: File telah disimpan di \`/workspace/uploads/${safeName}\`.`;
     }
 
-    // Catat ke memori Onlyx secara ringkas & hemat token
-    await saveMemory(sessionId, "user", `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: ${savedFilePath}). Instruksi: ${prompt || "-"}`);
+    // Catat ke memori Onlyx & raw memory
+    await saveMemory(sessionId, "user", `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`);
+    appendRawLog(sessionId, "user", `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`, { messageId: msg.message_id });
 
-    const currentHistory = await getHistoryForAI(sessionId, 6);
+    const currentHistory = await getHistoryForAI(sessionId, 12);
     await executeAICompletionAndReply({
       msg,
       sessionId,
       messages: buildMessagesWithSystem([
         ...currentHistory,
         { role: "user", content: userPrompt }
-      ]),
+      ], sessionId),
       userPromptForFiles: prompt || userPrompt,
       typing
     });
@@ -2256,11 +2285,11 @@ async function handleVoiceOrAudio(msg, isVoice = true) {
     const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
     const bufferData = Buffer.from(response.data);
 
-    // 3. Simpan fisik file audio ke folder workspace
-    const workspaceDir = getChatWorkspace(sessionId);
+    // 3. Simpan fisik file audio ke folder uploads workspace
+    const ws = ensureWorkspaceStructure(sessionId);
     const ext = path.extname(file.file_path) || (isVoice ? ".oga" : ".mp3");
     const audioFileName = `audio_${Date.now()}${ext}`;
-    const savedAudioPath = path.join(workspaceDir, audioFileName);
+    const savedAudioPath = path.join(ws.uploadsDir, audioFileName);
     fs.writeFileSync(savedAudioPath, bufferData);
 
     // 4. Transkripsikan dengan Faster-Whisper lokal
@@ -2282,29 +2311,36 @@ async function handleVoiceOrAudio(msg, isVoice = true) {
     const cleanedText = transcribedText.trim();
     console.log(`[Voice Note Transcribed] [Chat ${chatId}]: "${cleanedText}"`);
 
-    // 5. Catat ke memori Onlyx
+    // 5. Catat ke memori Onlyx & raw memory
     await saveMemory(
       sessionId,
       "user",
       `[Pesan Suara / Voice Note]: "${cleanedText}"`,
       msg.message_id
     );
+    appendRawLog(
+      sessionId,
+      "user",
+      `[Pesan Suara / Voice Note]: "${cleanedText}" (uploads/${audioFileName})`,
+      { messageId: msg.message_id }
+    );
 
     const promptCaption = (msg.caption || "").trim();
     const userPrompt = 
       `🎙️ [Voice Note / Pesan Suara Diterima & Ditranskripsikan]\n` +
       `• Hasil transkripsi ucapan user: "${cleanedText}"\n` +
+      `• File audio tersimpan di: \`uploads/${audioFileName}\`\n` +
       (promptCaption ? `• Catatan caption: "${promptCaption}"\n` : "") +
       `\nInstruksi AI Agent: User menyampaikan pesan di atas melalui rekaman suara. Tanggapi, jawab, atau eksekusi instruksinya secara cerdas, ramah, dan solutif.`;
 
-    const currentHistory = await getHistoryForAI(sessionId, 6);
+    const currentHistory = await getHistoryForAI(sessionId, 12);
     await executeAICompletionAndReply({
       msg,
       sessionId,
       messages: buildMessagesWithSystem([
         ...currentHistory,
         { role: "user", content: userPrompt }
-      ]),
+      ], sessionId),
       userPromptForFiles: cleanedText,
       typing
     });

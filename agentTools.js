@@ -24,6 +24,12 @@ const {
 const { startWebPreview, stopWebPreview, listActivePreviews } = require("./webPreviewManager.js");
 const { addReminder, addWatchdog, listTasks, removeTask } = require("./schedulerManager.js");
 const { queueRender, getRenderQueueStatus } = require("./remotionManager.js");
+const {
+  recordDecision,
+  updateProjectContext,
+  searchRawMemory,
+  ensureWorkspaceStructure
+} = require("./workspaceMemoryManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -622,6 +628,92 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["code"],
+      },
+    },
+  },
+
+  // --- o) record_decision ---
+  {
+    type: "function",
+    function: {
+      name: "record_decision",
+      description:
+        "Mencatat keputusan, kesepakatan, atau pilihan yang telah ditentukan oleh user (contoh: user memilih Opsi B, user memilih library Tailwind, user menentukan arsitektur atau aturan khusus). " +
+        "Catatan ini disimpan permanen di .memory/decisions.md dan otomatis diselipkan ke sistem prompt AI di percakapan berikutnya agar tidak pernah lupa.",
+      parameters: {
+        type: "object",
+        properties: {
+          decision: {
+            type: "string",
+            description: "Inti keputusan atau kesepakatan user secara padat dan jelas (contoh: 'User menyetujui opsi C: menggunakan Tailwind CSS dan SQLite').",
+          },
+          category: {
+            type: "string",
+            description: "Kategori keputusan (misal: 'Arsitektur', 'Desain/UI', 'Database', 'Preferensi User', 'Umum'). Default: 'Umum'",
+          },
+        },
+        required: ["decision"],
+      },
+    },
+  },
+
+  // --- p) update_project_context ---
+  {
+    type: "function",
+    function: {
+      name: "update_project_context",
+      description:
+        "Memperbarui ringkasan status proyek terkini di .memory/project_context.md. " +
+        "Panggil tool ini setelah kamu membuat/mengedit file penting, menjalankan server di background, atau menyelesaikan tahap proyek " +
+        "agar status dan progres proyek selalu terekam saat user bertanya kembali di pesan berikutnya.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: {
+            type: "string",
+            description: "Ringkasan 1-3 kalimat status pengerjaan proyek saat ini.",
+          },
+          active_files: {
+            type: "array",
+            items: { type: "string" },
+            description: "Daftar path file utama yang sedang aktif dikerjakan (contoh: ['work/snake/index.html', 'work/app.js']).",
+          },
+          active_services: {
+            type: "string",
+            description: "Layanan/server/port yang sedang aktif (contoh: 'Web server aktif di port 3000 (Python http.server)').",
+          },
+          status: {
+            type: "string",
+            description: "Status fase proyek (contoh: 'Dalam Pengerjaan', 'Selesai', 'Testing', 'Perencanaan'). Default: 'Dalam Pengerjaan'",
+          },
+        },
+        required: ["summary"],
+      },
+    },
+  },
+
+  // --- q) search_raw_memory ---
+  {
+    type: "function",
+    function: {
+      name: "search_raw_memory",
+      description:
+        "Mencari kata kunci pada arsip obrolan mentah masa lalu di .memory/raw/. " +
+        "Gunakan tool ini HANYA jika user merujuk kembali detail percakapan lama yang sudah terlewat dari jendela chat aktif " +
+        "(contoh: 'eh pilihan A kemarin kamu bilang apa aja?', 'ingat gak alasan kenapa kita pakai database ini?').",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Kata kunci atau topik yang ingin dicari di arsip riwayat percakapan.",
+          },
+          limit: {
+            type: "number",
+            description: "Batas jumlah potongan chat relevan yang dikembalikan (default: 5).",
+          },
+        },
+        required: ["query"],
       },
     },
   },
@@ -1353,6 +1445,59 @@ async function toolRenderRemotionVideo({ code, duration_seconds, fps, width, hei
   );
 }
 
+/**
+ * Tool: record_decision
+ * Mencatat keputusan, kesepakatan, atau pilihan user ke .memory/decisions.md
+ */
+async function toolRecordDecision({ decision, category, sessionId }) {
+  if (!decision) return "❌ Parameter 'decision' wajib diisi.";
+  try {
+    const res = recordDecision(sessionId || "default", decision, category || "Umum");
+    return `✅ Keputusan berhasil dicatat ke .memory/decisions.md:\n${res.entry}`;
+  } catch (err) {
+    return `❌ Gagal mencatat keputusan: ${err.message}`;
+  }
+}
+
+/**
+ * Tool: update_project_context
+ * Memperbarui status proyek terkini di .memory/project_context.md
+ */
+async function toolUpdateProjectContext({ summary, active_files, active_services, status, sessionId }) {
+  if (!summary && !active_files) return "❌ Minimal sertakan parameter 'summary' atau 'active_files'.";
+  try {
+    updateProjectContext(sessionId || "default", {
+      summary,
+      active_files,
+      active_services,
+      status: status || "Dalam Pengerjaan"
+    });
+    return `✅ Status proyek berhasil diperbarui di .memory/project_context.md`;
+  } catch (err) {
+    return `❌ Gagal memperbarui status proyek: ${err.message}`;
+  }
+}
+
+/**
+ * Tool: search_raw_memory
+ * Mencari cuplikan pada arsip percakapan mentah masa lalu di .memory/raw/
+ */
+async function toolSearchRawMemory({ query, limit, sessionId }) {
+  if (!query) return "❌ Parameter 'query' wajib diisi.";
+  try {
+    const matches = searchRawMemory(sessionId || "default", query, Number(limit) || 5);
+    if (!matches.length) {
+      return `🔍 Tidak ditemukan arsip obrolan yang cocok dengan kata kunci "${query}".`;
+    }
+    const formatted = matches
+      .map((m, idx) => `[Arsip #${idx + 1}] (${m.timestamp.slice(0, 16)} - ${m.role.toUpperCase()}):\n${m.content}`)
+      .join("\n\n---\n\n");
+    return `🔍 Ditemukan ${matches.length} arsip obrolan relevan:\n\n${formatted}`;
+  } catch (err) {
+    return `❌ Gagal mencari arsip obrolan: ${err.message}`;
+  }
+}
+
 // ============================================================
 // EXECUTOR UTAMA — MAPPING NAMA TOOL KE IMPLEMENTASI
 // ============================================================
@@ -1377,6 +1522,9 @@ const TOOL_HANDLERS = {
   create_watchdog: toolCreateWatchdog,
   media_download: toolMediaDownload,
   render_remotion_video: toolRenderRemotionVideo,
+  record_decision: toolRecordDecision,
+  update_project_context: toolUpdateProjectContext,
+  search_raw_memory: toolSearchRawMemory,
 };
 
 /**
@@ -1443,6 +1591,12 @@ function describeToolCall(name, args = {}) {
       else if (args.tts_text) bagian.push(`${oneLine(args.tts_text, 24)}...`);
       return `merender video ${bagian.join(" · ") || "(tanpa judul)"}`;
     }
+    case "record_decision":
+      return `mencatat keputusan: "${oneLine(args.decision, 60)}"`;
+    case "update_project_context":
+      return `memperbarui status proyek: "${oneLine(args.summary, 60)}"`;
+    case "search_raw_memory":
+      return `mencari arsip obrolan "${oneLine(args.query, 40)}"`;
     default:
       return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
   }

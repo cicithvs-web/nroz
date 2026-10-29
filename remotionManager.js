@@ -175,13 +175,16 @@ async function runRender({
   const userWs = path.join(WORKSPACE_BASE, safeSession);
   if (!fs.existsSync(userWs)) fs.mkdirSync(userWs, { recursive: true });
 
+  const artifactsDir = path.join(userWs, "artifacts");
+  if (!fs.existsSync(artifactsDir)) fs.mkdirSync(artifactsDir, { recursive: true });
+
   const timestamp = Date.now();
   const safeTitle = (title || "video")
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "_")
     .slice(0, 30);
   const outputFileName = `${safeTitle}_${timestamp}.mp4`;
-  const outputFilePath = path.join(userWs, outputFileName);
+  const outputFilePath = path.join(artifactsDir, outputFileName);
 
   // Buat direktori sementara untuk build komponen
   const renderTempDir = path.join(REMOTION_DIR, "renders", `render_${timestamp}`);
@@ -522,6 +525,14 @@ registerRoot(RemotionRoot);
 
     const stat = fs.statSync(outputFilePath);
     const sizeMb = (stat.size / (1024 * 1024)).toFixed(2);
+
+    // Hardlink/salinan ke root workspace agar kompatibel dengan pemanggil legacy
+    const legacyPath = path.join(userWs, outputFileName);
+    try {
+      if (!fs.existsSync(legacyPath)) {
+        fs.linkSync(outputFilePath, legacyPath);
+      }
+    } catch (_) {}
 
     return {
       success: true,
