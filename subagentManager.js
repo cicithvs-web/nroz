@@ -15,6 +15,7 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "run_code",
   "file_read",
   "file_write",
+  "file_edit",
   "file_list",
   "web_search",
   "read_url",

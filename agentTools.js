@@ -394,6 +394,36 @@ const TOOL_DEFINITIONS = [
     },
   },
 
+  // --- file_edit ---
+  {
+    type: "function",
+    function: {
+      name: "file_edit",
+      description:
+        "Melakukan pengeditan bedah presisi (surgical replacement) pada file yang sudah ada di VPS/workspace. " +
+        "Mencari blok teks 'target' yang sama persis dan menggantinya dengan 'replacement'. " +
+        "SANGAT DIREKOMENDASIKAN daripada file_write untuk mengubah kode yang sudah ada agar tidak menghapus atau merusak baris kode lainnya.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Path file yang akan diedit (misal: /workspace/work/server.js atau relatif)",
+          },
+          target: {
+            type: "string",
+            description: "Blok karakter/baris teks yang sama persis yang ingin diganti (termasuk spasi/indentasi)",
+          },
+          replacement: {
+            type: "string",
+            description: "Teks pengganti baru (kosongkan \"\" jika ingin menghapus blok target)",
+          },
+        },
+        required: ["path", "target", "replacement"],
+      },
+    },
+  },
+
   // --- h) file_list ---
   {
     type: "function",
@@ -1274,6 +1304,73 @@ async function toolFileWrite({ path: filePath, content, sessionId }) {
 }
 
 /**
+ * Tool: file_edit
+ * Melakukan pengeditan bedah presisi (surgical replacement) pada file yang sudah ada.
+ * Mengganti blok teks 'target' dengan teks 'replacement' tanpa menghapus sisa file.
+ */
+async function toolFileEdit({ path: filePath, target, replacement, sessionId }) {
+  if (!filePath || typeof filePath !== "string") {
+    return "❌ Parameter 'path' wajib berupa string.";
+  }
+  if (typeof target !== "string" || target.length === 0) {
+    return "❌ Parameter 'target' wajib berupa string teks yang ingin diganti (tidak boleh kosong).";
+  }
+  if (replacement === undefined || replacement === null || typeof replacement !== "string") {
+    return "❌ Parameter 'replacement' wajib berupa string (gunakan string kosong \"\" jika ingin menghapus target).";
+  }
+
+  const resolved = resolveFilePath(filePath, sessionId);
+
+  // Cek apakah target di direktori sistem
+  if (isSystemDir(resolved)) {
+    return `⛔ Akses ditolak: tidak boleh mengedit file di direktori sistem '${resolved}'.`;
+  }
+
+  if (!fs.existsSync(resolved)) {
+    return `❌ File '${filePath}' tidak ditemukan. Gunakan tool 'file_write' jika ingin membuat file baru dari nol.`;
+  }
+
+  try {
+    const content = fs.readFileSync(resolved, "utf-8");
+
+    // Tangani normalisasi line-ending jika file menggunakan CRLF vs LF
+    let effectiveTarget = target;
+    if (!content.includes(effectiveTarget)) {
+      if (content.includes(target.replace(/\r\n/g, "\n"))) {
+        effectiveTarget = target.replace(/\r\n/g, "\n");
+      } else if (content.includes(target.replace(/\n/g, "\r\n"))) {
+        effectiveTarget = target.replace(/\n/g, "\r\n");
+      }
+    }
+
+    if (!content.includes(effectiveTarget)) {
+      return (
+        `❌ Target teks tidak ditemukan dalam file '${filePath}'.\n` +
+        `Tips: Pastikan teks 'target' sama persis karakter per karakter termasuk spasi dan indentasi. ` +
+        `Gunakan tool 'file_read' terlebih dahulu untuk melihat isi file yang sebenarnya.`
+      );
+    }
+
+    const occurrences = content.split(effectiveTarget).length - 1;
+    const newContent = content.replaceAll(effectiveTarget, replacement);
+
+    fs.writeFileSync(resolved, newContent, "utf-8");
+
+    const targetLines = effectiveTarget.split("\n").length;
+    const repLines = replacement.split("\n").length;
+    const diffLines = repLines - targetLines;
+    const diffStr = diffLines >= 0 ? `+${diffLines}` : `${diffLines}`;
+
+    return (
+      `✅ Berhasil mengedit file '${filePath}' (${occurrences} bagian diganti, ${diffStr} baris).\n` +
+      `Dari sandbox terlihat sebagai: ${toSandboxPath(resolved, sessionId)}`
+    );
+  } catch (err) {
+    return `❌ Gagal mengedit file: ${err.message}`;
+  }
+}
+
+/**
  * Tool: file_list
  * Menampilkan daftar file di sebuah direktori.
  */
@@ -1772,6 +1869,7 @@ const TOOL_HANDLERS = {
   system_info: toolSystemInfo,
   file_read: toolFileRead,
   file_write: toolFileWrite,
+  file_edit: toolFileEdit,
   file_list: toolFileList,
   http_request: toolHttpRequest,
   start_web_preview: toolStartWebPreview,
@@ -1831,6 +1929,8 @@ function describeToolCall(name, args = {}) {
       return `membaca ${oneLine(path.basename(args.path || ""), 40)}`;
     case "file_write":
       return `menulis ${oneLine(path.basename(args.path || ""), 40)} (${Buffer.byteLength(String(args.content || ""))} byte)`;
+    case "file_edit":
+      return `mengedit bagian ${oneLine(path.basename(args.path || ""), 40)}`;
     case "file_list":
       return `daftar isi ${oneLine(args.path || ".", 40)}`;
     case "system_info":
