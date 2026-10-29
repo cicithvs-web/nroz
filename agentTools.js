@@ -736,8 +736,13 @@ const TOOL_DEFINITIONS = [
         properties: {
           role: {
             type: "string",
-            enum: ["coder", "researcher", "tester", "general"],
-            description: "Peran spesialis subagent: 'coder' (coding/proyek), 'researcher' (riset/analisis), 'tester' (QA/debugging), 'general' (umum).",
+            description:
+              "Nama peran subagent. Kamu bisa memakai preset ('coder', 'researcher', 'tester', 'general') atau menciptakan peran kustom spesialis baru secara bebas (contoh: 'DevOps Engineer', 'Data Analyst', 'Game Story Writer', 'Cybersecurity Auditor', 'UI Designer', dsb).",
+          },
+          role_description: {
+            type: "string",
+            description:
+              "Deskripsi persona, keahlian khusus, dan fokus kerja untuk peran ini. Sangat dianjurkan diisi jika kamu menciptakan peran kustom baru agar subagent bertindak sesuai ekspektasi ahli.",
           },
           task: {
             type: "string",
@@ -1537,12 +1542,13 @@ async function toolSearchRawMemory({ query, limit, sessionId }) {
  * Tool: delegate_task
  * Mendelegasikan tugas teknis berat/multi-langkah ke Subagent mandiri
  */
-async function toolDelegateTask({ role, task, max_rounds, sessionId, client, model, onSubagentProgress }) {
+async function toolDelegateTask({ role, role_description, task, max_rounds, sessionId, client, model, onSubagentProgress }) {
   if (!task) return "❌ Parameter 'task' (instruksi tugas) wajib diisi.";
   const safeRole = role || "general";
   try {
     const res = await runSubagent({
       role: safeRole,
+      roleDescription: role_description,
       task,
       sessionId: sessionId || "default",
       maxRounds: max_rounds || 10,

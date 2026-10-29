@@ -22,11 +22,14 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
 ]);
 
 /**
- * System prompt khusus per peran subagent
+ * System prompt khusus per peran subagent (mendukung Preset & Peran Kustom Dinamis)
+ * @param {string} role - Nama peran (misal: "coder", "researcher", atau custom seperti "DevOps Engineer", "Data Analyst")
+ * @param {string} [roleDescription] - Deskripsi persona dan tanggung jawab khusus yang ditentukan Lead Agent
  */
-function getSubagentSystemPrompt(role) {
+function getSubagentSystemPrompt(role, roleDescription = null) {
+  const cleanRole = String(role || "Spesialis Teknis").trim();
   const base =
-    "Kamu adalah Subagent Spesialis mandiri di dalam sistem Nroz AI yang bekerja di lingkungan Linux VPS (Persistent Docker Sandbox).\n" +
+    `Kamu adalah Subagent Spesialis: "${cleanRole}" di dalam sistem Nroz AI yang bekerja di lingkungan Linux VPS (Persistent Docker Sandbox).\n` +
     "Folder kerjamu ter-mount sebagai /workspace di dalam sandbox container.\n" +
     "- uploads/   : file mentah dari user (read-only referensi)\n" +
     "- work/      : area utama kamu ngoding, eksperimen, install paket, jalankan script/server\n" +
@@ -36,43 +39,50 @@ function getSubagentSystemPrompt(role) {
     "2. Jangan pernah menulis placeholder seperti '// TODO' atau '// tambahkan di sini'. Tulis kode/konten yang lengkap.\n" +
     "3. Setelah tugas selesai tuntas, berikan laporan akhir yang padat, jelas, dan faktual tentang apa yang telah kamu kerjakan (file yang dibuat, status pengujian, dan instruksi selanjutnya untuk Lead Agent).\n";
 
-  switch (role) {
-    case "coder":
-    case "builder":
-      return (
-        base +
-        "\nPeran Spesialis: CODER / BUILDER (Software Engineer)\n" +
-        "Fokus utamamu adalah merancang arsitektur kode, membuat/mengedit file proyek di /workspace/work/, " +
-        "menginstall paket dependensi bila dibutuhkan (via run_command), dan memastikan kode tidak ada error sintaks."
-      );
+  const lower = cleanRole.toLowerCase();
 
-    case "researcher":
-    case "analyzer":
-      return (
-        base +
-        "\nPeran Spesialis: RESEARCHER / ANALYZER (Information Specialist)\n" +
-        "Fokus utamamu adalah melakukan penelusuran informasi mendalam dari web (web_search, read_url) " +
-        "atau membedah dokumen/file di /workspace (file_read, file_list). " +
-        "Sajikan ringkasan temuan yang akurat, terstruktur, padat, dan bebas dari halusinasi."
-      );
-
-    case "tester":
-    case "auditor":
-      return (
-        base +
-        "\nPeran Spesialis: TESTER / AUDITOR (Quality Assurance & Debugger)\n" +
-        "Fokus utamamu adalah menguji kode, memeriksa apakah server/service berjalan (run_command, http_request), " +
-        "mencari bug atau kelemahan sistem, dan melaporkan secara presisi letak kesalahan beserta solusi perbaikannya."
-      );
-
-    case "general":
-    default:
-      return (
-        base +
-        "\nPeran: GENERAL SUBAGENT\n" +
-        "Fokus utamamu adalah menyelesaikan tugas spesifik yang diberikan oleh Lead Agent secara cepat, tepat, dan efisien."
-      );
+  // Preset 1: Coder
+  if (lower === "coder" || lower === "builder" || lower === "programmer" || lower === "software engineer") {
+    return (
+      base +
+      "\nPeran Spesialis: CODER / BUILDER (Software Engineer)\n" +
+      "Fokus utamamu adalah merancang arsitektur kode, membuat/mengedit file proyek di /workspace/work/, " +
+      "menginstall paket dependensi bila dibutuhkan (via run_command), dan memastikan kode tidak ada error sintaks." +
+      (roleDescription ? `\n\nInstruksi Khusus Peran:\n${roleDescription.trim()}` : "")
+    );
   }
+
+  // Preset 2: Researcher
+  if (lower === "researcher" || lower === "analyzer" || lower === "analyst") {
+    return (
+      base +
+      "\nPeran Spesialis: RESEARCHER / ANALYZER (Information Specialist)\n" +
+      "Fokus utamamu adalah melakukan penelusuran informasi mendalam dari web (web_search, read_url) " +
+      "atau membedah dokumen/file di /workspace (file_read, file_list). " +
+      "Sajikan ringkasan temuan yang akurat, terstruktur, padat, dan bebas dari halusinasi." +
+      (roleDescription ? `\n\nInstruksi Khusus Peran:\n${roleDescription.trim()}` : "")
+    );
+  }
+
+  // Preset 3: Tester / QA
+  if (lower === "tester" || lower === "auditor" || lower === "qa") {
+    return (
+      base +
+      "\nPeran Spesialis: TESTER / AUDITOR (Quality Assurance & Debugger)\n" +
+      "Fokus utamamu adalah menguji kode, memeriksa apakah server/service berjalan (run_command, http_request), " +
+      "mencari bug atau kelemahan sistem, dan melaporkan secara presisi letak kesalahan beserta solusi perbaikannya." +
+      (roleDescription ? `\n\nInstruksi Khusus Peran:\n${roleDescription.trim()}` : "")
+    );
+  }
+
+  // DINAMIS: Peran Kustom yang diciptakan bebas oleh Lead Agent
+  return (
+    base +
+    `\nPeran Kustom Dinamis: ${cleanRole.toUpperCase()}\n` +
+    (roleDescription
+      ? `Deskripsi Persona & Tanggung Jawab Khusus Peran Ini:\n${roleDescription.trim()}\n`
+      : `Sebagai spesialis ahli di bidang "${cleanRole}", selesaikan tugas dengan standar profesional terbaik dan pendekatan metodis yang tepat.`)
+  );
 }
 
 /**
@@ -112,6 +122,7 @@ function getDefaultClientAndModel() {
  */
 async function runSubagent({
   role = "general",
+  roleDescription = null,
   task,
   sessionId = "default",
   maxRounds = 10,
@@ -139,11 +150,8 @@ async function runSubagent({
     (t) => t.type === "function" && SUBAGENT_ALLOWED_TOOL_NAMES.has(t.function?.name)
   );
 
-  const safeRole = ["coder", "researcher", "tester", "general"].includes(role.toLowerCase())
-    ? role.toLowerCase()
-    : "general";
-
-  const systemPrompt = getSubagentSystemPrompt(safeRole);
+  const cleanRole = String(role || "general").trim();
+  const systemPrompt = getSubagentSystemPrompt(cleanRole, roleDescription);
   const currentMessages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: `Instruksi tugas yang harus kamu selesaikan:\n\n${task.trim()}` }
@@ -153,7 +161,7 @@ async function runSubagent({
   let finalReport = "";
   let roundsUsed = 0;
 
-  console.log(`[Subagent: ${safeRole}] Memulai tugas untuk sesi ${sessionId} (maks ${safeMaxRounds} langkah)...`);
+  console.log(`[Subagent: ${cleanRole}] Memulai tugas untuk sesi ${sessionId} (maks ${safeMaxRounds} langkah)...`);
 
   for (let round = 1; round <= safeMaxRounds; round++) {
     roundsUsed = round;
@@ -168,11 +176,11 @@ async function runSubagent({
         stream: false
       });
     } catch (apiErr) {
-      console.error(`[Subagent: ${safeRole}] Gagal memanggil LLM pada langkah ${round}:`, apiErr.message);
+      console.error(`[Subagent: ${cleanRole}] Gagal memanggil LLM pada langkah ${round}:`, apiErr.message);
       return {
         success: false,
-        role: safeRole,
-        report: `❌ Subagent ${safeRole} mengalami kendala API LLM: ${apiErr.message}`,
+        role: cleanRole,
+        report: `❌ Subagent ${cleanRole} mengalami kendala API LLM: ${apiErr.message}`,
         roundsUsed
       };
     }
@@ -185,7 +193,7 @@ async function runSubagent({
     // Jika tidak ada tool calls, subagent telah menyelesaikan tugasnya dan memberikan laporan
     if (!toolCalls || toolCalls.length === 0) {
       finalReport = assistantContent || "(Subagent menyelesaikan tugas tanpa catatan teks tambahan)";
-      console.log(`[Subagent: ${safeRole}] ✅ Tugas selesai pada langkah ${round}!`);
+      console.log(`[Subagent: ${cleanRole}] ✅ Tugas selesai pada langkah ${round}!`);
       break;
     }
 
@@ -216,12 +224,12 @@ async function runSubagent({
         continue;
       }
 
-      console.log(`[Subagent: ${safeRole}] Step ${round}/${safeMaxRounds} -> ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
+      console.log(`[Subagent: ${cleanRole}] Step ${round}/${safeMaxRounds} -> ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
 
       if (typeof onProgress === "function") {
         try {
           onProgress({
-            role: safeRole,
+            role: cleanRole,
             step: round,
             total: safeMaxRounds,
             tool: fnName,
@@ -248,7 +256,7 @@ async function runSubagent({
   // Jika sampai batas langkah belum ada jawaban final, minta subagent merangkum hasil kerjanya
   if (!finalReport) {
     try {
-      console.warn(`[Subagent: ${safeRole}] Batas ${safeMaxRounds} langkah tercapai. Meminta rangkuman akhir...`);
+      console.warn(`[Subagent: ${cleanRole}] Batas ${safeMaxRounds} langkah tercapai. Meminta rangkuman akhir...`);
       currentMessages.push({
         role: "user",
         content: "Batas langkah tugas telah tercapai. Berikan ringkasan padat dari apa saja yang sudah berhasil kamu selesaikan dan statusnya saat ini."
@@ -268,7 +276,7 @@ async function runSubagent({
 
   return {
     success: true,
-    role: safeRole,
+    role: cleanRole,
     report: finalReport,
     roundsUsed
   };
