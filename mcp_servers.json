@@ -11,6 +11,16 @@
         "chromium"
       ],
       "env": {}
+    },
+    "sequential_thinking": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "toolPrefix": "",
+      "env": {}
     }
   }
 }

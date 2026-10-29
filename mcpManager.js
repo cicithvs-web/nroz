@@ -76,9 +76,15 @@ async function initMCP() {
       activeServers.set(serverName, { client, transport, tools });
 
       for (const t of tools) {
-        // Standarisasi nama: jika sudah ada prefix serverName, jangan dobelkan
+        // Standarisasi nama tool
         let toolName = t.name;
-        if (!toolName.startsWith(`${serverName}_`) && !toolName.startsWith(serverName)) {
+        if (serverCfg.toolPrefix !== undefined) {
+          if (serverCfg.toolPrefix === false || serverCfg.toolPrefix === "") {
+            toolName = t.name;
+          } else {
+            toolName = `${serverCfg.toolPrefix}${t.name}`;
+          }
+        } else if (!toolName.startsWith(`${serverName}_`) && !toolName.startsWith(serverName)) {
           toolName = `${serverName}_${t.name}`;
         }
 
@@ -87,6 +93,23 @@ async function initMCP() {
           originalName: t.name,
           client
         });
+
+        // Daftarkan juga alias originalName jika berbeda, agar fleksibel
+        if (toolName !== t.name) {
+          mcpToolsRegistry.set(t.name, {
+            serverName,
+            originalName: t.name,
+            client
+          });
+        }
+        // Daftarkan alias sequential_thinking jika nama aslinya sequentialthinking
+        if (toolName === "sequentialthinking" || t.name === "sequentialthinking") {
+          mcpToolsRegistry.set("sequential_thinking", {
+            serverName,
+            originalName: t.name,
+            client
+          });
+        }
 
         mcpToolDefinitions.push({
           type: "function",

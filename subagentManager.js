@@ -27,7 +27,9 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "browser_take_screenshot",
   "browser_snapshot",
   "browser_wait_for",
-  "browser_close"
+  "browser_close",
+  "sequentialthinking",
+  "sequential_thinking"
 ]);
 
 /**

@@ -1867,6 +1867,11 @@ function describeToolCall(name, args = {}) {
     case "read_skill":
       return `mempelajari panduan skill \`${args.skill_name || ""}\``;
     default: {
+      if (name === "sequentialthinking" || name === "sequential_thinking") {
+        const step = args.thoughtNumber ? ` (langkah ${args.thoughtNumber}/${args.totalThoughts || '?'})` : "";
+        const preview = args.thought ? `: "${oneLine(args.thought, 40)}"` : "";
+        return `berpikir mendalam${step}${preview}`;
+      }
       if (name.startsWith("browser_")) {
         if (name === "browser_navigate") return `membuka web ${oneLine(args.url || "", 50)}`;
         if (name === "browser_take_screenshot") return "mengambil screenshot layar web";
