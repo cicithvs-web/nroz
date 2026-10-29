@@ -1195,11 +1195,11 @@ async function toolHttpRequest({ method, url, headers, body }) {
 
 /**
  * Tool: start_web_preview
- * Membuka tunnel Cloudflare ke port lokal
+ * Membuka tunnel Cloudflare ke port lokal atau container sandbox
  */
-async function toolStartWebPreview({ port, duration_minutes }) {
+async function toolStartWebPreview({ port, duration_minutes, sessionId }) {
   try {
-    const url = await startWebPreview(port, duration_minutes || 30);
+    const url = await startWebPreview(port, duration_minutes || 30, { sessionId });
     return `🌐 Link Web Preview Publik Aktif:\n🔗 ${url}\n\nLink ini dapat langsung dibuka di browser mana saja (aktif selama ${duration_minutes || 30} menit).`;
   } catch (err) {
     return `❌ Gagal membuat web preview: ${err.message}`;

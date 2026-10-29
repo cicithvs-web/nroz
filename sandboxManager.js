@@ -299,6 +299,25 @@ function getSandboxInfo(sessionId) {
   }
 }
 
+/**
+ * Mengambil IP address container sandbox user (di bridge docker0).
+ * Digunakan untuk koneksi langsung seperti tunnel web preview (cloudflared).
+ * @param {string} sessionId
+ * @returns {string|null} IP address container atau null jika tidak berjalan
+ */
+function getSandboxIP(sessionId) {
+  const containerName = getSafeContainerName(sessionId);
+  try {
+    const ip = execSync(
+      `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${containerName}`,
+      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
+    ).trim();
+    return ip || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = {
   ensureSandbox,
   ensureSandboxImage,
@@ -310,5 +329,6 @@ module.exports = {
   resetSandbox,
   getSandboxInfo,
   getSafeContainerName,
+  getSandboxIP,
   SANDBOX_IMAGE
 };
