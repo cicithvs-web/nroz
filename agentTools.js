@@ -31,6 +31,7 @@ const {
   ensureWorkspaceStructure
 } = require("./workspaceMemoryManager.js");
 const { runSubagent } = require("./subagentManager.js");
+const skillsManager = require("./skillsManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -804,6 +805,27 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["file_path"],
+      },
+    },
+  },
+
+  // --- u) read_skill ---
+  {
+    type: "function",
+    function: {
+      name: "read_skill",
+      description:
+        "Membaca panduan teknis mendalam dan SOP operasional dari katalog skill untuk keahlian tertentu (contoh: 'remotion_video', 'image_generation', 'subagent_orchestration', 'web_preview'). Gunakan tool ini sebelum memulai tugas yang relevan agar eksekusimu presisi.",
+      parameters: {
+        type: "object",
+        properties: {
+          skill_name: {
+            type: "string",
+            description:
+              "Nama skill dari katalog yang ingin dipelajari (contoh: 'remotion_video', 'image_generation', 'subagent_orchestration', 'web_preview').",
+          },
+        },
+        required: ["skill_name"],
       },
     },
   },
@@ -1723,6 +1745,15 @@ async function toolSendFile({ file_path, caption, sessionId, chatId, threadId, b
   }
 }
 
+/**
+ * Tool: read_skill
+ * Membaca panduan teknis mendalam untuk keahlian tertentu dari katalog skill
+ */
+async function toolReadSkill({ skill_name }) {
+  if (!skill_name) return "❌ Parameter 'skill_name' wajib diisi.";
+  return skillsManager.readSkill(skill_name);
+}
+
 // ============================================================
 // EXECUTOR UTAMA — MAPPING NAMA TOOL KE IMPLEMENTASI
 // ============================================================
@@ -1753,6 +1784,7 @@ const TOOL_HANDLERS = {
   delegate_task: toolDelegateTask,
   send_photo: toolSendPhoto,
   send_file: toolSendFile,
+  read_skill: toolReadSkill,
 };
 
 /**
@@ -1831,6 +1863,8 @@ function describeToolCall(name, args = {}) {
       return `mengirim foto ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
     case "send_file":
       return `mengirim file ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
+    case "read_skill":
+      return `mempelajari panduan skill \`${args.skill_name || ""}\``;
     default:
       return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
   }

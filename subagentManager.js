@@ -18,7 +18,8 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "file_list",
   "web_search",
   "read_url",
-  "http_request"
+  "http_request",
+  "read_skill"
 ]);
 
 /**
