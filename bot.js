@@ -1232,7 +1232,10 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       stepIndex++;
       const langkah = describeToolCall(fnName, fnArgs);
       if (isPrivate) {
-        await sendDraft(chatId, turnDraftId, `⏳ [${stepIndex}/${MAX_TOOL_ROUNDS}] ${langkah}`, msg.message_thread_id);
+        const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
+          ? `Sedang ${langkah}...`
+          : `Sedang melakukan ${langkah}...`;
+        await sendDraft(chatId, turnDraftId, actionText, msg.message_thread_id);
       }
 
       console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
@@ -1253,7 +1256,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
             await sendDraft(
               chatId,
               turnDraftId,
-              `🤖 [Subagent: ${role}] Langkah ${step}/${total}: ${actionDesc}`,
+              `Subagent (${role}): sedang ${actionDesc}...`,
               msg.message_thread_id
             );
           }
@@ -1263,11 +1266,13 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
 
       if (isPrivate) {
         const garis = result.split("\n").find((l) => l.trim()) || "";
-        const tanda = garis.startsWith("❌") ? "❌" : "✅";
+        const cleanGaris = garis.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "").trim();
+        const prefix = garis.startsWith("❌") ? "Gagal: " : "Selesai: ";
+        const draftDetail = cleanGaris ? `${prefix}${langkah} (${cleanGaris.slice(0, 70)})` : `${prefix}${langkah}...`;
         await sendDraft(
           chatId,
           turnDraftId,
-          `${tanda} [${stepIndex}/${MAX_TOOL_ROUNDS}] ${langkah} — ${garis.slice(0, 90)}`,
+          draftDetail,
           msg.message_thread_id
         );
       }
