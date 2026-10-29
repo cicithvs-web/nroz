@@ -53,6 +53,9 @@ const TELEGRAM_SEND_MAX_MB = Number(process.env.TELEGRAM_SEND_MAX_MB) || 48;
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 initScheduler(bot);
 
+// Peta sesi AI yang sedang aktif berjalan (untuk tombol /stop darurat ala CLI agent)
+const activeTurnSessions = new Map(); // sessionId -> { cancelled: boolean }
+
 // Inisialisasi sistem MCP Server
 initMCP().then((res) => {
   console.log(`[MCP Ready] ${res.connectedServers.length} server terhubung, ${res.totalTools} tool MCP aktif.`);
@@ -1107,14 +1110,37 @@ function cleanDraftPreview(text) {
     .replace(/<<<ENDFILE>>>?/gi, "");
 }
 
+/**
+ * Memangkas output tool-calling yang sudah lampau (Sliding Window) agar
+ * context window AI tidak membengkak dalam tugas maraton panjang (50-100+ langkah).
+ * Hanya mempertahankan output lengkap dari `keepRecent` tool calls terbaru.
+ */
+function pruneToolOutputsSlidingWindow(messages, keepRecent = 8) {
+  let toolCount = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "tool") {
+      toolCount++;
+      if (toolCount > keepRecent) {
+        if (typeof m.content === "string" && m.content.length > 150) {
+          const firstLine = m.content.split("\n").find((l) => l.trim()) || "Selesai";
+          const isError = m.content.includes("❌");
+          const statusText = isError ? "[Hasil lampau: Error]" : "[Hasil lampau: Selesai]";
+          m.content = `${statusText} — ${firstLine.slice(0, 100)}`;
+        }
+      }
+    }
+  }
+}
+
 async function executeAICompletionAndReply({ msg, sessionId, messages, userPromptForFiles, typing }) {
   const chatId = msg.chat.id;
   const isPrivate = msg.chat?.type === "private" || chatId > 0;
   let rawAnswer = "";
   const turnMediaSent = { photos: 0, files: 0 };
 
-  // Loop tool-calling: dibatasi 40 iterasi untuk mencegah loop tak terbatas
-  const MAX_TOOL_ROUNDS = 40;
+  // Loop tool-calling maraton (default 100 iterasi ala Kiro/Qoder CLI)
+  const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 100;
   let currentMessages = [...messages];
   let finalAnswerReceived = false;
   // Satu draft dipakai sepanjang giliran ini, jadi user melihat perintah yang sebenarnya
@@ -1122,200 +1148,227 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const turnDraftId = Math.floor(Math.random() * 2000000000) + 1;
   let stepIndex = 0;
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    let isStreamSuccess = false;
-    let assistantContent = "";
-    let toolCalls = [];
+  activeTurnSessions.set(sessionId, { cancelled: false });
 
-    // 1. Coba streaming terlebih dahulu
-    try {
-      const stream = await client.chat.completions.create({
-        model: currentConfig.model,
-        messages: currentMessages,
-        tools: getAllToolDefinitions(),
-        tool_choice: "auto",
-        stream: true
-      });
-
-      const draftId = isPrivate ? Math.floor(Math.random() * 2000000000) + 1 : null;
-      let lastDraftTime = 0;
-      // Akumulator untuk tool calls dari chunk streaming
-      const toolCallAccumulator = {};
-
-      for await (const chunk of stream) {
-        const choice = chunk.choices[0];
-        if (!choice) continue;
-
-        const delta = choice.delta;
-        if (delta.content) {
-          assistantContent += delta.content;
-
-          // Preview draft (streaming ke Telegram)
-          if (isPrivate && assistantContent.length > 0) {
-            const now = Date.now();
-            if (now - lastDraftTime > 1000) {
-              lastDraftTime = now;
-              const preview = cleanDraftPreview(assistantContent).trim();
-              if (preview) {
-                const previewText = preview.length > 4000 ? preview.slice(-4000) : preview;
-                await sendDraft(chatId, draftId, previewText, msg.message_thread_id);
-              }
-            }
-          }
-        }
-
-        // Akumulasi tool calls dari stream
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index;
-            if (!toolCallAccumulator[idx]) {
-              toolCallAccumulator[idx] = { id: tc.id || "", type: "function", function: { name: "", arguments: "" } };
-            }
-            if (tc.id) toolCallAccumulator[idx].id = tc.id;
-            if (tc.function?.name) toolCallAccumulator[idx].function.name += tc.function.name;
-            if (tc.function?.arguments) toolCallAccumulator[idx].function.arguments += tc.function.arguments;
-          }
-        }
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      // Cek apakah user mengirim perintah /stop atau /cancel di tengah jalan
+      if (activeTurnSessions.get(sessionId)?.cancelled) {
+        console.log(`[Tool Loop] Dihentikan oleh user (/stop) di sesi ${sessionId}`);
+        stopTyping(typing);
+        await replyText(msg, "🛑 Pekerjaan mandiri AI berhasil dihentikan atas permintaanmu.");
+        return;
       }
 
-      toolCalls = Object.values(toolCallAccumulator);
-      isStreamSuccess = true;
-    } catch (streamErr) {
-      console.warn(`[Stream AI] Streaming gagal: ${streamErr.message}`);
-    }
+      // Early Warning di 10 langkah sebelum batas maraton tercapai
+      if (round === MAX_TOOL_ROUNDS - 10) {
+        currentMessages.push({
+          role: "system",
+          content: `[PERINGATAN MARATON: Kamu sudah menggunakan ${round} dari batas ${MAX_TOOL_ROUNDS} langkah. Segera simpan progres pekerjaanmu ke .memory/project_context.md, selesaikan langkah akhir, dan berikan laporan lengkap ke user.]`
+        });
+      }
 
-    // 2. Fallback non-streaming jika stream gagal
-    if (!isStreamSuccess) {
+      let isStreamSuccess = false;
+      let assistantContent = "";
+      let toolCalls = [];
+
+      // 1. Coba streaming terlebih dahulu
       try {
-        const fallbackRes = await client.chat.completions.create({
+        const stream = await client.chat.completions.create({
           model: currentConfig.model,
           messages: currentMessages,
           tools: getAllToolDefinitions(),
           tool_choice: "auto",
-          stream: false
+          stream: true
         });
-        const choice = fallbackRes.choices[0];
-        assistantContent = choice.message?.content || "";
-        toolCalls = choice.message?.tool_calls || [];
-      } catch (fallbackErr) {
-        console.error("[AI Fallback] Gagal total:", fallbackErr.message);
-        stopTyping(typing);
-        await replyText(msg, "Terjadi kesalahan saat menghubungi AI.");
-        return;
-      }
-    }
 
-    // Jika tidak ada tool calls, ini adalah jawaban final
-    if (!toolCalls || toolCalls.length === 0) {
-      rawAnswer = assistantContent;
-      finalAnswerReceived = true;
-      break;
-    }
+        const draftId = isPrivate ? Math.floor(Math.random() * 2000000000) + 1 : null;
+        let lastDraftTime = 0;
+        // Akumulator untuk tool calls dari chunk streaming
+        const toolCallAccumulator = {};
 
-    // Bangun pesan assistant untuk riwayat percakapan
-    const assistantMsg = { role: "assistant", content: assistantContent || null };
-    if (toolCalls.length > 0) {
-      assistantMsg.tool_calls = toolCalls;
-    }
-    currentMessages.push(assistantMsg);
+        for await (const chunk of stream) {
+          const choice = chunk.choices[0];
+          if (!choice) continue;
 
-    // Eksekusi setiap tool call dan tambahkan hasilnya
-    for (const toolCall of toolCalls) {
-      const fnName = toolCall.function?.name;
-      let fnArgs = {};
-      try {
-        fnArgs = JSON.parse(toolCall.function?.arguments || "{}");
-      } catch {
-        fnArgs = {};
-      }
+          const delta = choice.delta;
+          if (delta.content) {
+            assistantContent += delta.content;
 
-      stepIndex++;
-      const langkah = describeToolCall(fnName, fnArgs);
-      if (isPrivate) {
-        const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
-          ? `Sedang ${langkah}...`
-          : `Sedang melakukan ${langkah}...`;
-        await sendDraft(chatId, turnDraftId, actionText, msg.message_thread_id);
-      }
+            // Preview draft (streaming ke Telegram)
+            if (isPrivate && assistantContent.length > 0) {
+              const now = Date.now();
+              if (now - lastDraftTime > 1000) {
+                lastDraftTime = now;
+                const preview = cleanDraftPreview(assistantContent).trim();
+                if (preview) {
+                  const previewText = preview.length > 4000 ? preview.slice(-4000) : preview;
+                  await sendDraft(chatId, draftId, previewText, msg.message_thread_id);
+                }
+              }
+            }
+          }
 
-      console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
-      const result = await executeTool(fnName, fnArgs, {
-        sessionId,
-        chatId,
-        threadId: msg.message_thread_id,
-        client,
-        model: currentConfig.model,
-        bot,
-        onMediaSent: (type) => {
-          if (type === "photo") turnMediaSent.photos++;
-          if (type === "file") turnMediaSent.files++;
-        },
-        onSubagentProgress: async ({ role, step, total, tool, args }) => {
-          if (isPrivate) {
-            const actionDesc = describeToolCall(tool, args);
-            await sendDraft(
-              chatId,
-              turnDraftId,
-              `Subagent (${role}): sedang ${actionDesc}...`,
-              msg.message_thread_id
-            );
+          // Akumulasi tool calls dari stream
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index;
+              if (!toolCallAccumulator[idx]) {
+                toolCallAccumulator[idx] = { id: tc.id || "", type: "function", function: { name: "", arguments: "" } };
+              }
+              if (tc.id) toolCallAccumulator[idx].id = tc.id;
+              if (tc.function?.name) toolCallAccumulator[idx].function.name += tc.function.name;
+              if (tc.function?.arguments) toolCallAccumulator[idx].function.arguments += tc.function.arguments;
+            }
           }
         }
-      });
-      console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
 
-      if (isPrivate) {
-        const garis = result.split("\n").find((l) => l.trim()) || "";
-        const cleanGaris = garis.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "").trim();
-        const prefix = garis.startsWith("❌") ? "Gagal: " : "Selesai: ";
-        const draftDetail = cleanGaris ? `${prefix}${langkah} (${cleanGaris.slice(0, 70)})` : `${prefix}${langkah}...`;
-        await sendDraft(
-          chatId,
-          turnDraftId,
-          draftDetail,
-          msg.message_thread_id
-        );
+        toolCalls = Object.values(toolCallAccumulator);
+        isStreamSuccess = true;
+      } catch (streamErr) {
+        console.warn(`[Stream AI] Streaming gagal: ${streamErr.message}`);
       }
 
-      currentMessages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: result
-      });
+      // 2. Fallback non-streaming jika stream gagal
+      if (!isStreamSuccess) {
+        try {
+          const fallbackRes = await client.chat.completions.create({
+            model: currentConfig.model,
+            messages: currentMessages,
+            tools: getAllToolDefinitions(),
+            tool_choice: "auto",
+            stream: false
+          });
+          const choice = fallbackRes.choices[0];
+          assistantContent = choice.message?.content || "";
+          toolCalls = choice.message?.tool_calls || [];
+        } catch (fallbackErr) {
+          console.error("[AI Fallback] Gagal total:", fallbackErr.message);
+          stopTyping(typing);
+          await replyText(msg, "Terjadi kesalahan saat menghubungi AI.");
+          return;
+        }
+      }
+
+      // Jika tidak ada tool calls, ini adalah jawaban final
+      if (!toolCalls || toolCalls.length === 0) {
+        rawAnswer = assistantContent;
+        finalAnswerReceived = true;
+        break;
+      }
+
+      // Bangun pesan assistant untuk riwayat percakapan
+      const assistantMsg = { role: "assistant", content: assistantContent || null };
+      if (toolCalls.length > 0) {
+        assistantMsg.tool_calls = toolCalls;
+      }
+      currentMessages.push(assistantMsg);
+
+      // Eksekusi setiap tool call dan tambahkan hasilnya
+      for (const toolCall of toolCalls) {
+        const fnName = toolCall.function?.name;
+        let fnArgs = {};
+        try {
+          fnArgs = JSON.parse(toolCall.function?.arguments || "{}");
+        } catch {
+          fnArgs = {};
+        }
+
+        stepIndex++;
+        const langkah = describeToolCall(fnName, fnArgs);
+        if (isPrivate) {
+          const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
+            ? `Sedang ${langkah}...`
+            : `Sedang melakukan ${langkah}...`;
+          await sendDraft(chatId, turnDraftId, actionText, msg.message_thread_id);
+        }
+
+        console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
+        const result = await executeTool(fnName, fnArgs, {
+          sessionId,
+          chatId,
+          threadId: msg.message_thread_id,
+          client,
+          model: currentConfig.model,
+          bot,
+          onMediaSent: (type) => {
+            if (type === "photo") turnMediaSent.photos++;
+            if (type === "file") turnMediaSent.files++;
+          },
+          onSubagentProgress: async ({ role, step, total, tool, args }) => {
+            if (isPrivate) {
+              const actionDesc = describeToolCall(tool, args);
+              await sendDraft(
+                chatId,
+                turnDraftId,
+                `Subagent (${role}): sedang ${actionDesc}...`,
+                msg.message_thread_id
+              );
+            }
+          }
+        });
+        console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
+
+        if (isPrivate) {
+          const garis = result.split("\n").find((l) => l.trim()) || "";
+          const cleanGaris = garis.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "").trim();
+          const prefix = garis.startsWith("❌") ? "Gagal: " : "Selesai: ";
+          const draftDetail = cleanGaris ? `${prefix}${langkah} (${cleanGaris.slice(0, 70)})` : `${prefix}${langkah}...`;
+          await sendDraft(
+            chatId,
+            turnDraftId,
+            draftDetail,
+            msg.message_thread_id
+          );
+        }
+
+        currentMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: result
+        });
+      }
+
+      // Pangkas output tool lama secara sliding-window agar context window tetap ramping dan kilat
+      pruneToolOutputsSlidingWindow(currentMessages, 8);
+
+      // Lanjut loop — LLM akan memproses hasil tool
     }
 
-    // Lanjut loop — LLM akan memproses hasil tool
-  }
+    // Hentikan indikator typing sebelum mengirim pesan final
+    stopTyping(typing);
 
-  // Hentikan indikator typing sebelum mengirim pesan final
-  stopTyping(typing);
+    // 3. Bersihkan jawaban dan kirim pesan permanen
+    let answer = cleanAnswer(cleanFileTags(rawAnswer));
+    if (!answer && rawAnswer) answer = rawAnswer;
+    if (!answer) {
+      if (finalAnswerReceived) {
+        answer = "(AI mengembalikan jawaban kosong)";
+      } else {
+        console.warn(`[Tool Loop] Batas maraton ${MAX_TOOL_ROUNDS} ronde tool tercapai.`);
+        answer = `⏱️ *Batas Maraton (${MAX_TOOL_ROUNDS} langkah) tercapai.*\n\n` +
+          `Pekerjaan telah berjalan hingga langkah ke-${stepIndex}. Seluruh file dan perubahan tersimpan aman di workspace.\n\n` +
+          `Ketik *"lanjutkan"* jika kamu ingin saya meneruskan tugas ini dari titik terakhir.`;
+      }
+    }
 
-  // 3. Bersihkan jawaban dan kirim pesan permanen
-  let answer = cleanAnswer(cleanFileTags(rawAnswer));
-  if (!answer && rawAnswer) answer = rawAnswer;
-  if (!answer) {
-    if (finalAnswerReceived) {
-      answer = "(AI mengembalikan jawaban kosong)";
+    const sent = await sendLongMessage(chatId, answer, getSendOptions(msg));
+    if (sent && sent.message_id) {
+      await saveMemory(sessionId, "assistant", answer, sent.message_id);
+      appendRawLog(sessionId, "assistant", answer, { messageId: sent.message_id });
     } else {
-      console.warn(`[Tool Loop] Batas ${MAX_TOOL_ROUNDS} ronde tool tercapai tanpa jawaban final.`);
-      answer = `⚠️ Batas ${MAX_TOOL_ROUNDS} langkah tool tercapai sebelum AI memberi jawaban final. Biasanya ada tool yang terus gagal — cek pm2 logs atau ulangi permintaan lebih spesifik.`;
+      await saveMemory(sessionId, "assistant", answer);
+      appendRawLog(sessionId, "assistant", answer);
     }
+
+    // 4. Otomatis buat & kirim file atau ZIP jika diminta
+    await handleGeneratedFiles(chatId, msg, rawAnswer, userPromptForFiles, turnMediaSent);
+
+    // 5. Otomatis padatkan riwayat ke Summary di background jika obrolan sudah banyak
+    triggerBackgroundCompaction(sessionId);
+  } finally {
+    activeTurnSessions.delete(sessionId);
   }
-
-  const sent = await sendLongMessage(chatId, answer, getSendOptions(msg));
-  if (sent && sent.message_id) {
-    await saveMemory(sessionId, "assistant", answer, sent.message_id);
-    appendRawLog(sessionId, "assistant", answer, { messageId: sent.message_id });
-  } else {
-    await saveMemory(sessionId, "assistant", answer);
-    appendRawLog(sessionId, "assistant", answer);
-  }
-
-  // 4. Otomatis buat & kirim file atau ZIP jika diminta
-  await handleGeneratedFiles(chatId, msg, rawAnswer, userPromptForFiles, turnMediaSent);
-
-  // 5. Otomatis padatkan riwayat ke Summary di background jika obrolan sudah banyak
-  triggerBackgroundCompaction(sessionId);
 }
 
 // Helper kirim pesan balasan cepat yang otomatis menghormati forum topic
@@ -1687,6 +1740,24 @@ bot.onText(/^\/canceltask(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
     await replyText(msg, `✅ Tugas \`${taskId}\` berhasil dibatalkan.`);
   } else {
     await replyText(msg, `❌ Tugas dengan ID \`${taskId}\` tidak ditemukan.`);
+  }
+});
+
+// --- PERINTAH REM DARURAT: STOP / CANCEL PROSES MARATON AI ---
+bot.onText(/^\/(?:stop|cancel|abort)(?:@\w+)?$/, async (msg) => {
+  if (msg.from && msg.from.is_bot) return;
+
+  const access = await checkUserAccess(msg);
+  if (!access.allowed) {
+    return handleAccessDenied(msg, access.status);
+  }
+
+  const sessionId = getSessionId(msg);
+  if (activeTurnSessions.has(sessionId)) {
+    activeTurnSessions.get(sessionId).cancelled = true;
+    await replyText(msg, "🛑 Menghentikan proses AI yang sedang berjalan...");
+  } else {
+    await replyText(msg, "ℹ️ Tidak ada proses AI maraton yang sedang berjalan di sesi ini.");
   }
 });
 

@@ -120,12 +120,33 @@ function getDefaultClientAndModel() {
 }
 
 /**
+ * Memangkas output tool-calling yang sudah lampau untuk subagent
+ */
+function pruneToolOutputsSlidingWindow(messages, keepRecent = 6) {
+  let toolCount = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "tool") {
+      toolCount++;
+      if (toolCount > keepRecent) {
+        if (typeof m.content === "string" && m.content.length > 150) {
+          const firstLine = m.content.split("\n").find((l) => l.trim()) || "Selesai";
+          const isError = m.content.includes("❌");
+          const statusText = isError ? "[Hasil lampau: Error]" : "[Hasil lampau: Selesai]";
+          m.content = `${statusText} — ${firstLine.slice(0, 100)}`;
+        }
+      }
+    }
+  }
+}
+
+/**
  * Menjalankan Subagent mandiri dengan isolated context loop
  * @param {object} params
  * @param {string} params.role - "coder" | "researcher" | "tester" | "general"
  * @param {string} params.task - Instruksi tugas lengkap
  * @param {string} [params.sessionId="default"] - ID sesi user Telegram
- * @param {number} [params.maxRounds=10] - Maksimal langkah tool loop (default: 10, max: 20)
+ * @param {number} [params.maxRounds=20] - Maksimal langkah tool loop (default: 20, max: 50)
  * @param {object} [params.client] - OpenAI instance
  * @param {string} [params.model] - Nama model LLM
  * @param {Function} [params.onProgress] - Callback progress untuk draft Telegram
@@ -169,7 +190,7 @@ async function runSubagent({
     { role: "user", content: `Instruksi tugas yang harus kamu selesaikan:\n\n${task.trim()}` }
   ];
 
-  const safeMaxRounds = Math.max(1, Math.min(Number(maxRounds) || 10, 20));
+  const safeMaxRounds = Math.max(1, Math.min(Number(maxRounds) || 20, 50));
   let finalReport = "";
   let roundsUsed = 0;
 
@@ -263,6 +284,9 @@ async function runSubagent({
         content: String(toolResult)
       });
     }
+
+    // Pangkas output tool lama secara sliding window
+    pruneToolOutputsSlidingWindow(currentMessages, 6);
   }
 
   // Jika sampai batas langkah belum ada jawaban final, minta subagent merangkum hasil kerjanya
