@@ -382,6 +382,8 @@ Kemampuan AI Agent & Eksekusi di VPS Terisolasi (Persistent Docker Sandbox):
   15. record_decision: mencatat keputusan/pilihan user ke .memory/decisions.md agar selalu kamu ingat.
   16. update_project_context: memperbarui status proyek aktif ke .memory/project_context.md.
   17. search_raw_memory: mencari arsip chat masa lalu di .memory/raw/.
+  18. send_photo: mengirim gambar/foto/grafik/diagram/ilustrasi (.png, .jpg, .webp) dari workspace langsung ke chat Telegram user. WAJIB kamu panggil setiap selesai membuat/mengedit gambar!
+  19. send_file: mengirim file fisik/dokumen/arsip (.zip, .pdf, .txt, .csv, kode) dari workspace langsung ke chat Telegram user sebagai lampiran.
 - Gunakan tools yang tersedia kapan pun dibutuhkan secara proaktif. Jangan pernah bilang "saya tidak bisa" untuk hal yang bisa kamu lakukan dengan tools.
 
 Pedoman & Fitur Unggulan:
@@ -394,14 +396,14 @@ Pedoman & Fitur Unggulan:
 - Kemandirian Sistem & Paket Linux: Jika kamu menjalankan perintah terminal lalu menemukan bahwa program atau command belum terpasang ("command not found"), kamu memiliki izin penuh untuk menginstallnya secara otomatis menggunakan: \`apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y <nama_paket>\` (selalu gunakan flag -y agar tidak macet).
 - Semua file dan foto yang dikirimkan user disimpan secara fisik di folder workspace masing-masing di VPS:
   Path: /root/nroz/workspace/<chatId>/ (ter-mount ke /workspace di dalam sandbox).
-- Pengiriman File Fisik Server:
-  Jika user meminta untuk mengirimkan file fisik yang ada di server kembali ke chat Telegram, gunakan tag khusus:
-  <<<SENDFILE:/path/lengkap/ke/file>>> (atau <<<SENDFILE:nama_file.ext>>>)
-  Sistem bot akan otomatis mengambil file dari disk server dan mengirimkannya sebagai dokumen ke user.
-- Visualisasi Data & Grafik (Data Analyst):
-  Jika user meminta grafik, chart, visualisasi data, statistik, atau korelasi, buatlah script Python (menggunakan matplotlib/seaborn/pandas) atau Node.js untuk menganalisis data dan menyimpan gambar grafik (contoh: chart.png) di workspace, lalu kirimkan langsung dengan tag:
-  <<<SENDPHOTO:/path/ke/chart.png>>> (atau <<<SENDPHOTO:chart.png>>>)
-  Bot akan langsung merender dan mengirimkannya sebagai foto Telegram beresolusi tinggi.
+- Pembuatan & Pengiriman Gambar, Foto, Visualisasi & Grafik:
+  Jika user meminta dibuatkan gambar, lukisan, foto, diagram, ilustrasi, chart, atau visualisasi data (contoh: "buatin gambar boneka salju", "buat grafik penjualan"):
+  1. Buat gambar tersebut menggunakan script Python (Pillow/PIL, matplotlib, seaborn, svg) atau Node.js dan simpan hasilnya di \`/workspace/artifacts/<nama_file>.png\`.
+  2. SETELAH GAMBAR SELESAI DIBUAT, KAMU WAJIB MEMANGGIL TOOL \`send_photo\` dengan path file tersebut (contoh: \`file_path: "/workspace/artifacts/boneka_salju.png"\`, \`caption: "Boneka salju sudah jadi!"\`) agar gambarnya langsung terkirim ke chat Telegram user!
+  3. DILARANG KERAS hanya membuat file di disk server dan berkata "gambar sudah jadi" tanpa memanggil tool \`send_photo\`. User tidak bisa melihat server, jadi gambar harus dikirim via \`send_photo\`!
+- Pengiriman File Dokumen, ZIP & Proyek:
+  Jika user meminta file proyek, arsip dokumen, PDF, atau file fisik yang ada di server dikirimkan, gunakan tool \`send_file\` (contoh: \`file_path: "/workspace/artifacts/project.zip"\`).
+  Kamu juga tetap bisa menggunakan tag <<<SENDFILE:/path/ke/file>>> atau <<<SENDPHOTO:/path/ke/gambar>>> sebagai alternatif teks.
 - Pembuatan Video Animasi & Suara (Remotion React Video + AI Voice):
   ⚠️ ATURAN MUTLAK PEMBUATAN VIDEO:
   Jika user meminta untuk membuat, merancang, atau merender VIDEO dalam bentuk apa pun (video ucapan ulang tahun/selamat, kinetic typography quotes, kartu nama digital animasi, promo diskon, countdown timer, animasi teks bergerak, video pendek Shorts/Reels, atau video dengan suara/musik):
@@ -607,7 +609,7 @@ function cleanFileTags(text) {
   return text
     .replace(/<<<ZIP:\s*[^\n>]+\.zip\s*>>>/gi, "")
     .replace(/<<<SENDFILE:\s*[^\n>]+\s*>>>/gi, "")
-    .replace(/<<<SENDPHOTO:\s*[^\n>]+\s*>>>/gi, "")
+    .replace(/<<<(?:SENDPHOTO|SENDIMAGE):\s*[^\n>]+\s*>>>/gi, "")
     .replace(/<<<SENDVIDEO:\s*[^\n>]+\s*>>>/gi, "")
     .replace(/<<<FILE:\s*([^\n>]+)>>>\s*\n([\s\S]*?)<<<ENDFILE>>>/gi, (match, fname, code) => {
       const ext = path.extname(fname).replace(".", "") || "";
@@ -707,7 +709,52 @@ function extractFilesFromAnswer(text, userPrompt = "") {
   return files;
 }
 
-async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
+/**
+ * Menerjemahkan path dari model (baik /workspace/..., path host, atau path relatif)
+ * ke path absolut host yang benar di dalam workspace user.
+ */
+function resolveToHost(rawPath, sessionId) {
+  if (!rawPath || typeof rawPath !== "string") return "";
+  const clean = rawPath.trim();
+  const userWs = getChatWorkspace(sessionId);
+
+  // Jika format sandbox /workspace/...
+  if (clean === "/workspace") return userWs;
+  if (clean.startsWith("/workspace/")) {
+    const candidateDirect = path.join(userWs, clean.slice("/workspace/".length));
+    if (fs.existsSync(candidateDirect)) return candidateDirect;
+    // Cek juga di folder artifacts/ jika nama file cocok
+    const candidateInArtifacts = path.join(userWs, "artifacts", path.basename(clean));
+    if (fs.existsSync(candidateInArtifacts)) return candidateInArtifacts;
+    return candidateDirect;
+  }
+
+  // Jika sudah merupakan path host di workspace
+  if (clean.startsWith("/root/nroz/workspace/")) {
+    return path.resolve(clean);
+  }
+
+  // Jika path absolut lain tapi ada di dalam userWs
+  if (path.isAbsolute(clean)) {
+    const candidateInWs = path.join(userWs, clean.replace(/^\/+/, ""));
+    if (fs.existsSync(candidateInWs)) return candidateInWs;
+    const candidateInArtifacts = path.join(userWs, "artifacts", path.basename(clean));
+    if (fs.existsSync(candidateInArtifacts)) return candidateInArtifacts;
+    return path.resolve(clean);
+  }
+
+  // Path relatif: cek langsung di userWs
+  const directPath = path.resolve(userWs, clean);
+  if (fs.existsSync(directPath)) return directPath;
+
+  // Cek jika ada di userWs/artifacts/
+  const inArtifacts = path.resolve(userWs, "artifacts", clean);
+  if (fs.existsSync(inArtifacts)) return inArtifacts;
+
+  return directPath;
+}
+
+async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt, turnMediaSent = { photos: 0, files: 0 }) {
   try {
     const sendOpts = {};
     if (msg.message_thread_id) {
@@ -720,7 +767,7 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
     const sendFileMatches = [...rawAnswer.matchAll(/<<<SENDFILE:\s*([^\n>]+)>>>/gi)];
     for (const match of sendFileMatches) {
       const rawPath = match[1].trim();
-      const targetPath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(userWs, rawPath);
+      const targetPath = resolveToHost(rawPath, sessionId);
       try {
         if (fs.existsSync(targetPath)) {
           const stats = fs.statSync(targetPath);
@@ -735,6 +782,7 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
                 ...sendOpts
               }
             );
+            turnMediaSent.files++;
           }
         }
       } catch (err) {
@@ -742,11 +790,11 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
       }
     }
 
-    // 1.5 Cek jika AI meminta mengirimkan foto / grafik / visualisasi data (<<<SENDPHOTO:/path/ke/gambar>>>)
-    const sendPhotoMatches = [...rawAnswer.matchAll(/<<<SENDPHOTO:\s*([^\n>]+)>>>/gi)];
+    // 1.5 Cek jika AI meminta mengirimkan foto / grafik / visualisasi data (<<<SENDPHOTO:...>>> atau <<<SENDIMAGE:...>>>)
+    const sendPhotoMatches = [...rawAnswer.matchAll(/<<<(?:SENDPHOTO|SENDIMAGE):\s*([^\n>]+)>>>/gi)];
     for (const match of sendPhotoMatches) {
       const rawPath = match[1].trim();
-      const targetPath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(userWs, rawPath);
+      const targetPath = resolveToHost(rawPath, sessionId);
       try {
         if (fs.existsSync(targetPath)) {
           const stats = fs.statSync(targetPath);
@@ -756,11 +804,12 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
               chatId,
               targetPath,
               {
-                caption: `📊 *Grafik / Visualisasi:* \`${fileName}\``,
+                caption: `🖼️ *Gambar / Visual:* \`${fileName}\``,
                 parse_mode: "Markdown",
                 ...sendOpts
               }
             );
+            turnMediaSent.photos++;
           }
         }
       } catch (err) {
@@ -772,7 +821,7 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
     const sendVideoMatches = [...rawAnswer.matchAll(/<<<SENDVIDEO:\s*([^\n>]+)>>>/gi)];
     for (const match of sendVideoMatches) {
       const rawPath = match[1].trim();
-      const targetPath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(userWs, rawPath);
+      const targetPath = resolveToHost(rawPath, sessionId);
       try {
         if (fs.existsSync(targetPath)) {
           const stats = fs.statSync(targetPath);
@@ -792,6 +841,55 @@ async function handleGeneratedFiles(chatId, msg, rawAnswer, userPrompt) {
         }
       } catch (err) {
         console.error(`[SendVideo Error] Gagal kirim video ${targetPath}:`, err.message);
+      }
+    }
+
+    // 1.9 Fallback Cerdas: Jika user meminta gambar dan belum ada foto yang terkirim di turn ini
+    if (turnMediaSent.photos === 0) {
+      const isImageIntent = /\b(gambar|foto|lukis|image|photo|draw|chart|grafik|ilustrasi|diagram)\b/i.test(userPrompt || "");
+      if (isImageIntent) {
+        const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+        const searchDirs = [path.join(userWs, "artifacts"), userWs];
+        let newestImage = null;
+        let newestMtime = 0;
+        const now = Date.now();
+        const MAX_IMAGE_AGE_MS = 3 * 60 * 1000; // 3 menit terakhir
+
+        for (const dir of searchDirs) {
+          if (fs.existsSync(dir)) {
+            try {
+              const files = fs.readdirSync(dir);
+              for (const file of files) {
+                const full = path.join(dir, file);
+                try {
+                  const st = fs.statSync(full);
+                  if (st.isFile() && imageExts.has(path.extname(file).toLowerCase())) {
+                    const age = now - st.mtimeMs;
+                    if (age < MAX_IMAGE_AGE_MS && st.mtimeMs > newestMtime) {
+                      newestMtime = st.mtimeMs;
+                      newestImage = full;
+                    }
+                  }
+                } catch (_) {}
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (newestImage) {
+          console.log(`[AutoImageDelivery] Mengirimkan gambar terbaru hasil buatan AI ke chat: ${newestImage}`);
+          const fileName = path.basename(newestImage);
+          try {
+            await bot.sendPhoto(chatId, newestImage, {
+              caption: `🖼️ *Hasil Gambar:* \`${fileName}\``,
+              parse_mode: "Markdown",
+              ...sendOpts
+            });
+            turnMediaSent.photos++;
+          } catch (autoErr) {
+            console.error(`[AutoImageDelivery Error] Gagal kirim foto ${newestImage}:`, autoErr.message);
+          }
+        }
       }
     }
 
@@ -1041,6 +1139,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const chatId = msg.chat.id;
   const isPrivate = msg.chat?.type === "private" || chatId > 0;
   let rawAnswer = "";
+  const turnMediaSent = { photos: 0, files: 0 };
 
   // Loop tool-calling: dibatasi 40 iterasi untuk mencegah loop tak terbatas
   const MAX_TOOL_ROUNDS = 40;
@@ -1171,6 +1270,11 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
         threadId: msg.message_thread_id,
         client,
         model: currentConfig.model,
+        bot,
+        onMediaSent: (type) => {
+          if (type === "photo") turnMediaSent.photos++;
+          if (type === "file") turnMediaSent.files++;
+        },
         onSubagentProgress: async ({ role, step, total, tool, args }) => {
           if (isPrivate) {
             const actionDesc = describeToolCall(tool, args);
@@ -1231,7 +1335,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   }
 
   // 4. Otomatis buat & kirim file atau ZIP jika diminta
-  await handleGeneratedFiles(chatId, msg, rawAnswer, userPromptForFiles);
+  await handleGeneratedFiles(chatId, msg, rawAnswer, userPromptForFiles, turnMediaSent);
 
   // 5. Otomatis padatkan riwayat ke Summary di background jika obrolan sudah banyak
   triggerBackgroundCompaction(sessionId);

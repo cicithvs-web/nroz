@@ -757,6 +757,56 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // --- s) send_photo ---
+  {
+    type: "function",
+    function: {
+      name: "send_photo",
+      description:
+        "Mengirimkan file gambar, foto, lukisan, grafik, diagram, atau ilustrasi (.png, .jpg, .jpeg, .webp) dari workspace langsung ke chat Telegram user. WAJIB kamu panggil setiap kali selesai membuat atau mengedit gambar agar hasil visualnya langsung sampai ke user!",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: {
+            type: "string",
+            description:
+              "Path file gambar di workspace (contoh: '/workspace/artifacts/boneka_salju.png' atau 'artifacts/boneka_salju.png').",
+          },
+          caption: {
+            type: "string",
+            description: "Keterangan atau caption singkat yang akan menyertai foto di Telegram (opsional).",
+          },
+        },
+        required: ["file_path"],
+      },
+    },
+  },
+
+  // --- t) send_file ---
+  {
+    type: "function",
+    function: {
+      name: "send_file",
+      description:
+        "Mengirimkan file fisik (dokumen PDF, arsip ZIP, file kode, JSON, CSV, TXT, dll) dari workspace langsung ke chat Telegram user sebagai lampiran.",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: {
+            type: "string",
+            description:
+              "Path file di workspace (contoh: '/workspace/artifacts/project.zip' atau 'laporan.pdf').",
+          },
+          caption: {
+            type: "string",
+            description: "Keterangan dokumen (opsional).",
+          },
+        },
+        required: ["file_path"],
+      },
+    },
+  },
 ];
 
 // ============================================================
@@ -1568,6 +1618,111 @@ async function toolDelegateTask({ role, role_description, task, max_rounds, sess
   }
 }
 
+/**
+ * Helper mencari path file host yang valid dengan toleransi artifacts/ dan folder workspace
+ */
+function findHostFileWithFallback(rawPath, sessionId) {
+  const hostPath = resolveFilePath(rawPath, sessionId);
+  if (fs.existsSync(hostPath) && fs.statSync(hostPath).isFile()) {
+    return hostPath;
+  }
+  const sessionWs = getSessionWorkspace(sessionId);
+  // Cek apakah ada di folder artifacts/
+  const inArtifacts = path.join(sessionWs, "artifacts", path.basename(rawPath));
+  if (fs.existsSync(inArtifacts) && fs.statSync(inArtifacts).isFile()) {
+    return inArtifacts;
+  }
+  // Cek langsung di root sessionWs
+  const inWs = path.join(sessionWs, path.basename(rawPath));
+  if (fs.existsSync(inWs) && fs.statSync(inWs).isFile()) {
+    return inWs;
+  }
+  return hostPath;
+}
+
+/**
+ * Tool: send_photo
+ * Mengirim gambar/foto (.png, .jpg, .jpeg, .webp, .gif) dari workspace ke chat Telegram user
+ */
+async function toolSendPhoto({ file_path, caption, sessionId, chatId, threadId, bot, onMediaSent }) {
+  if (!file_path) return "❌ Parameter 'file_path' wajib diisi.";
+  const hostPath = findHostFileWithFallback(file_path, sessionId);
+  if (!fs.existsSync(hostPath) || !fs.statSync(hostPath).isFile()) {
+    return `❌ File gambar tidak ditemukan di: ${file_path} (path host: ${hostPath}). Pastikan file gambar sudah dibuat sebelumnya di /workspace/ atau /workspace/artifacts/.`;
+  }
+
+  const fileName = path.basename(hostPath);
+
+  if (!bot || !chatId) {
+    return `✅ Gambar '${fileName}' siap dikirim. <<<SENDPHOTO:${file_path}>>>`;
+  }
+
+  try {
+    const sendOpts = {};
+    if (caption) {
+      sendOpts.caption = caption;
+      sendOpts.parse_mode = "Markdown";
+    }
+    if (threadId) {
+      sendOpts.message_thread_id = threadId;
+    }
+
+    await bot.sendPhoto(chatId, hostPath, sendOpts);
+    if (typeof onMediaSent === "function") onMediaSent("photo");
+    return `✅ Foto '${fileName}' berhasil dikirim langsung ke chat Telegram user.`;
+  } catch (err) {
+    console.error(`[toolSendPhoto Error] ${err.message}`);
+    try {
+      const docOpts = {
+        caption: caption || `🖼️ *Gambar:* \`${fileName}\``,
+        parse_mode: "Markdown"
+      };
+      if (threadId) docOpts.message_thread_id = threadId;
+      await bot.sendDocument(chatId, hostPath, docOpts);
+      if (typeof onMediaSent === "function") onMediaSent("photo");
+      return `✅ Gambar '${fileName}' berhasil dikirim sebagai dokumen ke chat Telegram user.`;
+    } catch (docErr) {
+      return `❌ Gagal mengirim foto ke Telegram: ${err.message}`;
+    }
+  }
+}
+
+/**
+ * Tool: send_file
+ * Mengirim file fisik (.zip, .pdf, .txt, .csv, file kode) dari workspace ke chat Telegram user
+ */
+async function toolSendFile({ file_path, caption, sessionId, chatId, threadId, bot, onMediaSent }) {
+  if (!file_path) return "❌ Parameter 'file_path' wajib diisi.";
+  const hostPath = findHostFileWithFallback(file_path, sessionId);
+  if (!fs.existsSync(hostPath) || !fs.statSync(hostPath).isFile()) {
+    return `❌ File tidak ditemukan di: ${file_path} (path host: ${hostPath}).`;
+  }
+
+  const fileName = path.basename(hostPath);
+
+  if (!bot || !chatId) {
+    return `✅ File '${fileName}' siap dikirim. <<<SENDFILE:${file_path}>>>`;
+  }
+
+  try {
+    const sendOpts = {};
+    if (caption) {
+      sendOpts.caption = caption;
+      sendOpts.parse_mode = "Markdown";
+    }
+    if (threadId) {
+      sendOpts.message_thread_id = threadId;
+    }
+
+    await bot.sendDocument(chatId, hostPath, sendOpts);
+    if (typeof onMediaSent === "function") onMediaSent("file");
+    return `✅ File '${fileName}' berhasil dikirim langsung ke chat Telegram user.`;
+  } catch (err) {
+    console.error(`[toolSendFile Error] ${err.message}`);
+    return `❌ Gagal mengirim file ke Telegram: ${err.message}`;
+  }
+}
+
 // ============================================================
 // EXECUTOR UTAMA — MAPPING NAMA TOOL KE IMPLEMENTASI
 // ============================================================
@@ -1596,6 +1751,8 @@ const TOOL_HANDLERS = {
   update_project_context: toolUpdateProjectContext,
   search_raw_memory: toolSearchRawMemory,
   delegate_task: toolDelegateTask,
+  send_photo: toolSendPhoto,
+  send_file: toolSendFile,
 };
 
 /**
@@ -1670,6 +1827,10 @@ function describeToolCall(name, args = {}) {
       return `mencari arsip obrolan "${oneLine(args.query, 40)}"`;
     case "delegate_task":
       return `mendelegasikan ke subagent ${oneLine(args.role || "coder", 12)}: "${oneLine(args.task, 50)}"`;
+    case "send_photo":
+      return `mengirim foto ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
+    case "send_file":
+      return `mengirim file ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
     default:
       return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
   }
@@ -1708,6 +1869,12 @@ async function executeTool(name, args, context = {}) {
     }
     if (context && context.model) {
       safeArgs.model = context.model;
+    }
+    if (context && context.bot) {
+      safeArgs.bot = context.bot;
+    }
+    if (context && context.onMediaSent) {
+      safeArgs.onMediaSent = context.onMediaSent;
     }
     if (context && context.onSubagentProgress) {
       safeArgs.onSubagentProgress = context.onSubagentProgress;
