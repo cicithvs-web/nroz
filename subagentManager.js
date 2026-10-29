@@ -19,7 +19,15 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "web_search",
   "read_url",
   "http_request",
-  "read_skill"
+  "read_skill",
+  "browser_navigate",
+  "browser_click",
+  "browser_type",
+  "browser_fill_form",
+  "browser_take_screenshot",
+  "browser_snapshot",
+  "browser_wait_for",
+  "browser_close"
 ]);
 
 /**

@@ -8,6 +8,7 @@
     "test-db": "node test-db.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "adm-zip": "^0.5.10",
     "axios": "^1.x",
     "dotenv": "^16.x",

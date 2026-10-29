@@ -17,3 +17,5 @@ remotion-engine/public/*.wav
 # OS files
 .DS_Store
 Thumbs.db
+.playwright-mcp/
+.qoder/

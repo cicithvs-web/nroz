@@ -32,6 +32,7 @@ const {
 } = require("./workspaceMemoryManager.js");
 const { runSubagent } = require("./subagentManager.js");
 const skillsManager = require("./skillsManager.js");
+const mcpManager = require("./mcpManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -1865,9 +1866,27 @@ function describeToolCall(name, args = {}) {
       return `mengirim file ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
     case "read_skill":
       return `mempelajari panduan skill \`${args.skill_name || ""}\``;
-    default:
+    default: {
+      if (name.startsWith("browser_")) {
+        if (name === "browser_navigate") return `membuka web ${oneLine(args.url || "", 50)}`;
+        if (name === "browser_take_screenshot") return "mengambil screenshot layar web";
+        if (name === "browser_click") return `mengklik elemen di web (${oneLine(args.selector || "", 30)})`;
+        if (name === "browser_type") return `mengetik teks di web (${oneLine(args.selector || "", 25)})`;
+        if (name === "browser_fill_form") return "mengisi form di halaman web";
+        if (name === "browser_snapshot") return "memeriksa struktur elemen halaman web";
+        if (name === "browser_wait_for") return "menunggu halaman web merespon";
+        return `menjalankan browser: ${name.replace("browser_", "")}`;
+      }
       return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
+    }
   }
+}
+
+/**
+ * Mengembalikan seluruh tool definitions gabungan (Tool Bawaan + Tool MCP Aktif)
+ */
+function getAllToolDefinitions() {
+  return [...TOOL_DEFINITIONS, ...mcpManager.getMcpToolDefinitions()];
 }
 
 /**
@@ -1881,12 +1900,6 @@ function describeToolCall(name, args = {}) {
  */
 async function executeTool(name, args, context = {}) {
   try {
-    // Cari handler tool
-    const handler = TOOL_HANDLERS[name];
-    if (!handler) {
-      return `❌ Tool '${name}' tidak ditemukan. Tool yang tersedia: ${Object.keys(TOOL_HANDLERS).join(", ")}`;
-    }
-
     // Pastikan args berupa objek
     const safeArgs = typeof args === "object" && args !== null ? { ...args } : {};
     if (context && context.sessionId) {
@@ -1914,6 +1927,17 @@ async function executeTool(name, args, context = {}) {
       safeArgs.onSubagentProgress = context.onSubagentProgress;
     }
 
+    // 1. Cek apakah ini tool dari MCP Server
+    if (mcpManager.hasMcpTool(name)) {
+      return await mcpManager.callMcpTool(name, safeArgs, context);
+    }
+
+    // 2. Cari handler tool lokal bawaan
+    const handler = TOOL_HANDLERS[name];
+    if (!handler) {
+      return `❌ Tool '${name}' tidak ditemukan. Tool yang tersedia: ${Object.keys(TOOL_HANDLERS).join(", ")}`;
+    }
+
     // Jalankan tool dan kembalikan hasilnya
     const result = await handler(safeArgs);
     return typeof result === "string" ? result : String(result);
@@ -1929,6 +1953,7 @@ async function executeTool(name, args, context = {}) {
 
 module.exports = {
   TOOL_DEFINITIONS,
+  getAllToolDefinitions,
   executeTool,
   describeToolCall,
 };

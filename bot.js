@@ -30,7 +30,8 @@ const {
 } = require("./onlyxHelper.js");
 
 // Import modul agent tools untuk kemampuan AI Agent (tool-calling)
-const { TOOL_DEFINITIONS, executeTool, describeToolCall } = require("./agentTools.js");
+const { TOOL_DEFINITIONS, getAllToolDefinitions, executeTool, describeToolCall } = require("./agentTools.js");
+const { initMCP, closeAllMcp } = require("./mcpManager.js");
 const { resetSandbox, getSandboxInfo } = require("./sandboxManager.js");
 const { initScheduler, listTasks, removeTask } = require("./schedulerManager.js");
 const { transcribeAudio } = require("./voiceManager.js");
@@ -51,6 +52,22 @@ const TELEGRAM_SEND_MAX_MB = Number(process.env.TELEGRAM_SEND_MAX_MB) || 48;
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 initScheduler(bot);
+
+// Inisialisasi sistem MCP Server
+initMCP().then((res) => {
+  console.log(`[MCP Ready] ${res.connectedServers.length} server terhubung, ${res.totalTools} tool MCP aktif.`);
+}).catch((err) => {
+  console.warn(`[MCP Init Warning]:`, err.message);
+});
+
+process.on("SIGINT", async () => {
+  await closeAllMcp();
+  process.exit(0);
+});
+process.on("SIGTERM", async () => {
+  await closeAllMcp();
+  process.exit(0);
+});
 
 /**
  * PROGRES RENDER DI CHAT
@@ -1093,7 +1110,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       const stream = await client.chat.completions.create({
         model: currentConfig.model,
         messages: currentMessages,
-        tools: TOOL_DEFINITIONS,
+        tools: getAllToolDefinitions(),
         tool_choice: "auto",
         stream: true
       });
@@ -1151,7 +1168,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
         const fallbackRes = await client.chat.completions.create({
           model: currentConfig.model,
           messages: currentMessages,
-          tools: TOOL_DEFINITIONS,
+          tools: getAllToolDefinitions(),
           tool_choice: "auto",
           stream: false
         });
