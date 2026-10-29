@@ -21,6 +21,7 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "read_url",
   "http_request",
   "read_skill",
+  "save_skill",
   "browser_navigate",
   "browser_click",
   "browser_type",

@@ -860,6 +860,35 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // --- v) save_skill ---
+  {
+    type: "function",
+    function: {
+      name: "save_skill",
+      description:
+        "Menyimpan keahlian teknis, SOP eksekusi, resep coding, atau workflow baru ke pustaka skill khusus user di /workspace/skills/. " +
+        "Gunakan tool ini secara proaktif setelah berhasil menyelesaikan tugas rumit, menemukan solusi/trik konfigurasi yang spesifik untuk proyek user, atau saat user meminta 'ingat cara ini' / '/learn'.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "Nama unik skill dalam snake_case (misal: 'deploy_express_pm2', 'format_laporan_bulanan', 'setup_jwt_auth')",
+          },
+          description: {
+            type: "string",
+            description: "Deskripsi singkat 1-2 kalimat tentang kegunaan skill ini dan kapan harus digunakan",
+          },
+          content: {
+            type: "string",
+            description: "Dokumen panduan lengkap (Markdown) berisi langkah-demi-langkah, contoh kode, konfigurasi, perintah terminal yang terbukti berhasil, dan cara mengatasi potensi error.",
+          },
+        },
+        required: ["name", "description", "content"],
+      },
+    },
+  },
 ];
 
 // ============================================================
@@ -1847,9 +1876,38 @@ async function toolSendFile({ file_path, caption, sessionId, chatId, threadId, b
  * Tool: read_skill
  * Membaca panduan teknis mendalam untuk keahlian tertentu dari katalog skill
  */
-async function toolReadSkill({ skill_name }) {
+async function toolReadSkill({ skill_name, sessionId }) {
   if (!skill_name) return "❌ Parameter 'skill_name' wajib diisi.";
-  return skillsManager.readSkill(skill_name);
+  return skillsManager.readSkill(skill_name, sessionId);
+}
+
+/**
+ * Tool: save_skill
+ * Menyimpan keahlian/SOP baru hasil belajar ke folder skill khusus workspace
+ */
+async function toolSaveSkill({ name, description, content, sessionId }) {
+  if (!name || typeof name !== "string") {
+    return "❌ Parameter 'name' wajib berupa string identitas skill.";
+  }
+  if (!content || typeof content !== "string") {
+    return "❌ Parameter 'content' panduan skill wajib diisi.";
+  }
+  const desc = description || `Keahlian khusus untuk ${name}`;
+  try {
+    const res = skillsManager.saveUserSkill(sessionId || "default", {
+      name,
+      description: desc,
+      content
+    });
+    return (
+      `✅ Keahlian baru '${res.name}' berhasil dipelajari dan disimpan!\n` +
+      `• Path: /workspace/skills/${res.name}/SKILL.md\n` +
+      `• Deskripsi: ${res.description}\n` +
+      `Keahlian ini sekarang otomatis aktif di katalog skill-mu dan bisa dipanggil kapan saja dengan read_skill({"skill_name": "${res.name}"}).`
+    );
+  } catch (err) {
+    return `❌ Gagal menyimpan skill: ${err.message}`;
+  }
 }
 
 // ============================================================
@@ -1884,6 +1942,7 @@ const TOOL_HANDLERS = {
   send_photo: toolSendPhoto,
   send_file: toolSendFile,
   read_skill: toolReadSkill,
+  save_skill: toolSaveSkill,
 };
 
 /**
@@ -1966,6 +2025,8 @@ function describeToolCall(name, args = {}) {
       return `mengirim file ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
     case "read_skill":
       return `mempelajari panduan skill \`${args.skill_name || ""}\``;
+    case "save_skill":
+      return `merekam keahlian baru: ${oneLine(args.name || "", 30)}`;
     default: {
       if (name === "sequentialthinking" || name === "sequential_thinking") {
         const step = args.thoughtNumber ? ` (langkah ${args.thoughtNumber}/${args.totalThoughts || '?'})` : "";

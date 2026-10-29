@@ -382,8 +382,8 @@ Instruksi:
 }
 
 // === SISTEM PROMPT INTI (LEAN CORE) DENGAN ON-DEMAND SKILLS (ALA ANTIGRAVITY) ===
-function getBaseSystemPrompt() {
-  const skillsIndex = skillsManager.getSkillsPromptIndex();
+function getBaseSystemPrompt(sessionId = null) {
+  const skillsIndex = skillsManager.getSkillsPromptIndex(sessionId);
   return `Kamu adalah Nroz AI, asisten dan AI Agent yang cerdas, praktis, mandiri, dan serba bisa.
 Kemampuan AI Agent & Eksekusi di VPS Terisolasi (Persistent Docker Sandbox):
 - Kamu memiliki akses tools lengkap:
@@ -406,9 +406,10 @@ Kemampuan AI Agent & Eksekusi di VPS Terisolasi (Persistent Docker Sandbox):
   17. search_raw_memory: mencari arsip chat masa lalu di .memory/raw/.
   18. send_photo: mengirim gambar/foto/grafik/diagram (.png, .jpg, .webp) dari workspace langsung ke chat Telegram user.
   19. send_file: mengirim file fisik/dokumen/arsip (.zip, .pdf, .txt, .csv, kode) dari workspace langsung ke chat Telegram user sebagai lampiran.
-  20. read_skill: MEMBACA PANDUAN MENDALAM DARI KATALOG SKILL untuk keahlian tertentu sebelum mengeksekusi tugas.
-  21. sequentialthinking: bernalar mendalam bertahap (Chain-of-Thought dinamis) untuk tugas-tugas rumit.
-  22. browser_*: membuka browser Chromium asli via MCP, snapshot DOM, navigasi, klik, isi form, dan kirim screenshot live.
+  20. read_skill: MEMBACA PANDUAN MENDALAM DARI KATALOG SKILL (baik bawaan sistem maupun skill khusus hasil belajarmu) sebelum mengeksekusi tugas.
+  21. save_skill: MENYIMPAN KEAHLIAN / SOP BARU ke pustaka skill khusus user (/workspace/skills/) agar kamu makin pintar dan mengingat solusi/resep proyek ini selamanya.
+  22. sequentialthinking: bernalar mendalam bertahap (Chain-of-Thought dinamis) untuk tugas-tugas rumit.
+  23. browser_*: membuka browser Chromium asli via MCP, snapshot DOM, navigasi, klik, isi form, dan kirim screenshot live.
 - Gunakan tools yang tersedia kapan pun dibutuhkan secara proaktif. Jangan pernah bilang "saya tidak bisa" untuk hal yang bisa kamu lakukan dengan tools.
 
 ${skillsIndex}
@@ -422,7 +423,9 @@ Sebagai AI Agent sejati, kamu TIDAK MENUNGGU disuruh memilih tool secara spesifi
 3. Inisiatif Pendelegasian Subagent (delegate_task):
    Jika tugas user melibatkan pembuatan proyek kode besar multi-file, riset web mendalam pada banyak sumber, atau audit pengujian komprehensif: segera delegasikan ke Subagent mandiri agar jendela konteks tetap bersih dan pekerjaan selesai tuntas.
 4. Inisiatif Pembacaan Panduan Skill (read_skill):
-   Jika tugas user berkaitan dengan video React/Remotion, pembuatan grafik/gambar, tunnel web preview, automasi browser, atau penalaran mendalam: segera panggil \`read_skill\` sebelum mulai bekerja agar kamu mengikuti standar baku arsitektur yang benar.
+   Jika tugas user berkaitan dengan video React/Remotion, pembuatan grafik/gambar, tunnel web preview, automasi browser, atau keahlian khusus yang pernah kamu pelajari: segera panggil \`read_skill\` sebelum mulai bekerja agar kamu mengikuti standar baku arsitektur yang benar.
+5. Inisiatif Pembelajaran Berkelanjutan (save_skill):
+   Jika kamu baru saja menyelesaikan setup kompleks, berhasil memecahkan bug rumit setelah beberapa percobaan, menemukan alur kerja proyek yang spesifik, atau user mengajarkan aturan khusus: SEGERA DOKUMENTASIKAN keahlian tersebut menggunakan tool \`save_skill\` agar kamu tidak perlu mengulangi proses trial-and-error di masa depan.
 
 🔄 Prinsip Verifikasi & Pemulihan Mandiri (Verification & Self-Correction):
 - Dilarang Melapor Selesai Tanpa Verifikasi:
@@ -444,6 +447,7 @@ Aturan Inti & Lingkungan Eksekusi:
   • /workspace/uploads/ : Berisi semua file/dokumen/foto mentah kiriman user (referensi asli).
   • /workspace/work/    : Tempat utama kamu ngoding, install dependensi, uji kode, dan jalankan server/script.
   • /workspace/artifacts/ : Tempat menyimpan hasil jadi/final (video MP4, ZIP project, gambar final siap kirim).
+  • /workspace/skills/  : Pustaka keahlian khusus hasil belajar dari pengalaman di workspace user ini.
   • /workspace/.memory/ : Pusat memori cerdas kamu (decisions.md, project_context.md, raw/).
     - Gunakan tool \`record_decision\` setiap kali user menyetujui opsi/pilihan penting.
     - Gunakan tool \`update_project_context\` setiap kali ada perubahan status atau milestone proyek.
@@ -464,7 +468,7 @@ Format Tabel & Respon:
 }
 
 function buildMessagesWithSystem(historyMessages, sessionId = null) {
-  let systemContent = getBaseSystemPrompt();
+  let systemContent = getBaseSystemPrompt(sessionId);
   if (sessionId) {
     const memoryInject = getInjectedMemoryContext(sessionId);
     if (memoryInject) {
@@ -1809,6 +1813,66 @@ bot.onText(/^\/summary(?:@\w+)?$/, async (msg) => {
     msg,
     `📝 *Ringkasan Memori Topik Saat Ini:*\n\n_${state.summary}_`
   );
+});
+
+// --- PERINTAH KATALOG SKILL AKTIF (GLOBAL & WORKSPACE) ---
+bot.onText(/^\/(?:skills|keahlian)(?:@\w+)?$/, async (msg) => {
+  if (msg.from && msg.from.is_bot) return;
+
+  const access = await checkUserAccess(msg);
+  if (!access.allowed) {
+    return handleAccessDenied(msg, access.status);
+  }
+
+  const sessionId = getSessionId(msg);
+  const allSkills = skillsManager.listSkills(sessionId);
+  const globals = allSkills.filter((s) => s.scope !== "workspace");
+  const userLearned = allSkills.filter((s) => s.scope === "workspace");
+
+  let reply = `📚 *Katalog Keahlian AI (@NrozBot)*\n\n`;
+  reply += `🌐 *Keahlian Bawaan Sistem (${globals.length}):*\n`;
+  for (const s of globals) {
+    reply += `• \`${s.name}\`: ${s.description}\n`;
+  }
+
+  reply += `\n👤 *Keahlian Khusus Kamu (${userLearned.length}):*\n`;
+  if (userLearned.length === 0) {
+    reply += `_(Belum ada keahlian khusus yang dipelajari. Gunakan \`/learn <topik>\` untuk merekam keahlian baru.)_\n`;
+  } else {
+    for (const s of userLearned) {
+      reply += `• \`${s.name}\`: ${s.description}\n`;
+    }
+  }
+
+  reply += `\n💡 _Tips: AI bisa membaca dan mengeksekusi panduan skill apa pun via tool \`read_skill\`!_`;
+  await replyText(msg, reply);
+});
+
+// --- PERINTAH /learn (REKAM KEAHLIAN / RESEP BARU DARI PENGALAMAN) ---
+bot.onText(/^\/learn(?:@\w+)?(?:\s+([\s\S]+))?$/, async (msg, match) => {
+  if (msg.from && msg.from.is_bot) return;
+
+  const access = await checkUserAccess(msg);
+  if (!access.allowed) {
+    return handleAccessDenied(msg, access.status);
+  }
+
+  const sessionId = getSessionId(msg);
+  const topic = match && match[1] ? match[1].trim() : "";
+  const promptInstruction = topic
+    ? `Rangkum dan dokumentasikan seluruh langkah, konfigurasi, dan solusi yang telah kita lakukan mengenai '${topic}' menjadi sebuah keahlian baru menggunakan tool 'save_skill'. Tuliskan panduan teknis yang presisi, perintah terminal yang berhasil, dan template kodenya.`
+    : `Rangkum dan dokumentasikan solusi atau alur kerja terbaik dari percakapan kita baru-baru ini menjadi sebuah keahlian baru menggunakan tool 'save_skill'. Tuliskan panduan teknis yang presisi, perintah terminal yang berhasil, dan template kodenya.`;
+
+  const typing = startTyping(msg.chat.id, msg.message_thread_id);
+  await replyText(msg, `🧠 *Mempelajari Keahlian Baru...*\nAI sedang menganalisis pengalaman obrolan dan menyusun file SOP di folder \`/workspace/skills/\` kamu.`);
+
+  await executeAICompletionAndReply({
+    msg,
+    sessionId,
+    messages: buildMessagesWithSystem(await getHistoryForAI(sessionId, 12), sessionId),
+    userPromptForFiles: promptInstruction,
+    typing
+  });
 });
 
 // --- PERINTAH PAUSE (Jeda Bot untuk Diskusi Sesama Member) ---
