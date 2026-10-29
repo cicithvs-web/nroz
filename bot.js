@@ -1376,7 +1376,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
 }
 
 // Helper kirim pesan balasan cepat yang otomatis menghormati forum topic
-function replyText(msg, text, extraOpts = {}) {
+async function replyText(msg, text, extraOpts = {}) {
   const options = {
     parse_mode: "Markdown",
     ...extraOpts
@@ -1384,7 +1384,17 @@ function replyText(msg, text, extraOpts = {}) {
   if (msg.message_thread_id) {
     options.message_thread_id = msg.message_thread_id;
   }
-  return bot.sendMessage(msg.chat.id, text, options);
+  try {
+    return await bot.sendMessage(msg.chat.id, text, options);
+  } catch (err) {
+    if (err.message && err.message.includes("can't parse entities")) {
+      console.warn("[replyText] Markdown entity error, fallback kirim plain text:", err.message);
+      const fallbackOpts = { ...options };
+      delete fallbackOpts.parse_mode;
+      return await bot.sendMessage(msg.chat.id, text, fallbackOpts);
+    }
+    throw err;
+  }
 }
 
 // Helper abaikan pesan yang sengaja diawali simbol diskusi manusia (//, !, atau /)
@@ -1837,14 +1847,14 @@ bot.onText(/^\/(?:skills|keahlian)(?:@\w+)?$/, async (msg) => {
 
   reply += `\n👤 *Keahlian Khusus Kamu (${userLearned.length}):*\n`;
   if (userLearned.length === 0) {
-    reply += `_(Belum ada keahlian khusus yang dipelajari. Gunakan \`/learn <topik>\` untuk merekam keahlian baru.)_\n`;
+    reply += `_(Belum ada keahlian khusus yang dipelajari. Gunakan /learn [topik] untuk merekam keahlian baru.)_\n`;
   } else {
     for (const s of userLearned) {
       reply += `• \`${s.name}\`: ${s.description}\n`;
     }
   }
 
-  reply += `\n💡 _Tips: AI bisa membaca dan mengeksekusi panduan skill apa pun via tool \`read_skill\`!_`;
+  reply += `\n💡 Tips: AI membaca panduan skill secara otomatis menggunakan tool \`read_skill\`.`;
   await replyText(msg, reply);
 });
 
