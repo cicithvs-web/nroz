@@ -30,6 +30,7 @@ const {
   searchRawMemory,
   ensureWorkspaceStructure
 } = require("./workspaceMemoryManager.js");
+const { runSubagent } = require("./subagentManager.js");
 
 // ============================================================
 // KONSTANTA DAN UTILITAS
@@ -714,6 +715,40 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["query"],
+      },
+    },
+  },
+
+  // --- r) delegate_task ---
+  {
+    type: "function",
+    function: {
+      name: "delegate_task",
+      description:
+        "Mendelegasikan tugas teknis berat, terstruktur, atau multi-langkah ke Subagent Mandiri (Orchestration pattern ala Antigravity). " +
+        "Subagent memiliki jendela konteks terisolasi, mengeksekusi tools (file_write, run_command, web_search, dsb) hingga tuntas, dan mengembalikan laporan ringkas ke kamu. " +
+        "Gunakan tool ini jika: " +
+        "(1) membuat proyek/kumpulan file kode lengkap di /workspace/work/ ('role': 'coder'), " +
+        "(2) riset web mendalam atau membaca banyak dokumen ('role': 'researcher'), atau " +
+        "(3) menguji kode, mencari bug, dan memeriksa respon server ('role': 'tester').",
+      parameters: {
+        type: "object",
+        properties: {
+          role: {
+            type: "string",
+            enum: ["coder", "researcher", "tester", "general"],
+            description: "Peran spesialis subagent: 'coder' (coding/proyek), 'researcher' (riset/analisis), 'tester' (QA/debugging), 'general' (umum).",
+          },
+          task: {
+            type: "string",
+            description: "Instruksi tugas yang lengkap, jelas, dan spesifik yang harus diselesaikan oleh subagent.",
+          },
+          max_rounds: {
+            type: "number",
+            description: "Batas maksimal langkah tool loop subagent (default: 10, maksimal: 20).",
+          },
+        },
+        required: ["role", "task"],
       },
     },
   },
@@ -1498,6 +1533,35 @@ async function toolSearchRawMemory({ query, limit, sessionId }) {
   }
 }
 
+/**
+ * Tool: delegate_task
+ * Mendelegasikan tugas teknis berat/multi-langkah ke Subagent mandiri
+ */
+async function toolDelegateTask({ role, task, max_rounds, sessionId, client, model, onSubagentProgress }) {
+  if (!task) return "❌ Parameter 'task' (instruksi tugas) wajib diisi.";
+  const safeRole = role || "general";
+  try {
+    const res = await runSubagent({
+      role: safeRole,
+      task,
+      sessionId: sessionId || "default",
+      maxRounds: max_rounds || 10,
+      client,
+      model,
+      onProgress: onSubagentProgress,
+      executeTool,
+      allToolDefinitions: TOOL_DEFINITIONS
+    });
+
+    return (
+      `🤖 [Laporan Subagent: ${res.role.toUpperCase()}] (selesai dalam ${res.roundsUsed} langkah):\n\n` +
+      `${res.report}`
+    );
+  } catch (err) {
+    return `❌ Gagal menjalankan subagent ${safeRole}: ${err.message}`;
+  }
+}
+
 // ============================================================
 // EXECUTOR UTAMA — MAPPING NAMA TOOL KE IMPLEMENTASI
 // ============================================================
@@ -1525,6 +1589,7 @@ const TOOL_HANDLERS = {
   record_decision: toolRecordDecision,
   update_project_context: toolUpdateProjectContext,
   search_raw_memory: toolSearchRawMemory,
+  delegate_task: toolDelegateTask,
 };
 
 /**
@@ -1597,6 +1662,8 @@ function describeToolCall(name, args = {}) {
       return `memperbarui status proyek: "${oneLine(args.summary, 60)}"`;
     case "search_raw_memory":
       return `mencari arsip obrolan "${oneLine(args.query, 40)}"`;
+    case "delegate_task":
+      return `mendelegasikan ke subagent ${oneLine(args.role || "coder", 12)}: "${oneLine(args.task, 50)}"`;
     default:
       return oneLine(maskSecret(`${name} ${JSON.stringify(args)}`), 90, name);
   }
@@ -1629,6 +1696,15 @@ async function executeTool(name, args, context = {}) {
     }
     if (context && context.threadId !== undefined) {
       safeArgs.threadId = context.threadId;
+    }
+    if (context && context.client) {
+      safeArgs.client = context.client;
+    }
+    if (context && context.model) {
+      safeArgs.model = context.model;
+    }
+    if (context && context.onSubagentProgress) {
+      safeArgs.onSubagentProgress = context.onSubagentProgress;
     }
 
     // Jalankan tool dan kembalikan hasilnya

@@ -378,9 +378,18 @@ Kemampuan AI Agent & Eksekusi di VPS Terisolasi (Persistent Docker Sandbox):
   11. media_download: mengunduh video atau audio dari link internet (YouTube, TikTok, Instagram, Twitter/X, SoundCloud, dll) via yt-dlp & ffmpeg.
   12. render_remotion_video: membuat dan merender video animasi berkualitas tinggi (MP4) dari kode React/TypeScript (Remotion). Non-blocking: mengembalikan nomor job, video dikirim otomatis ke chat. Narasi panjang pakai tts_text (naskah utuh) atau tts_lines (banyak suara) — durasi mengikuti audio sampai 900 detik.
   13. check_command_output: membaca status dan output perintah yang tadi dijalankan dengan run_command {"background": true}.
+  14. delegate_task: mendelegasikan tugas berat/multi-langkah ke Subagent Mandiri (coder, researcher, tester) dengan context terisolasi agar context chat utama tetap bersih dan hemat token.
+  15. record_decision: mencatat keputusan/pilihan user ke .memory/decisions.md agar selalu kamu ingat.
+  16. update_project_context: memperbarui status proyek aktif ke .memory/project_context.md.
+  17. search_raw_memory: mencari arsip chat masa lalu di .memory/raw/.
 - Gunakan tools yang tersedia kapan pun dibutuhkan secara proaktif. Jangan pernah bilang "saya tidak bisa" untuk hal yang bisa kamu lakukan dengan tools.
 
 Pedoman & Fitur Unggulan:
+- Orchestrasi Subagent Mandiri (Pola Delegasi Ala Antigravity):
+  Sebagai Lead Agent, kamu tidak harus melakukan semua hal sendirian. Jika user meminta tugas besar yang membutuhkan banyak langkah teknis (misal: "buatkan game lengkap", "riset topik mendalam", atau "uji dan debug kode"):
+  • Gunakan tool \`delegate_task\` dengan role yang tepat ('coder', 'researcher', 'tester', atau 'general').
+  • Subagent akan bekerja mandiri di background dan mengembalikan laporan ringkas ke kamu.
+  • Setelah menerima laporan dari subagent, kamu tinggal menyimpulkan atau mengambil langkah selanjutnya (misal menyalakan web preview).
 - Kemandirian Sistem & Paket Linux: Jika kamu menjalankan perintah terminal lalu menemukan bahwa program atau command belum terpasang ("command not found"), kamu memiliki izin penuh untuk menginstallnya secara otomatis menggunakan: \`apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y <nama_paket>\` (selalu gunakan flag -y agar tidak macet).
 - Semua file dan foto yang dikirimkan user disimpan secara fisik di folder workspace masing-masing di VPS:
   Path: /root/nroz/workspace/<chatId>/ (ter-mount ke /workspace di dalam sandbox).
@@ -1155,7 +1164,24 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       }
 
       console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
-      const result = await executeTool(fnName, fnArgs, { sessionId, chatId, threadId: msg.message_thread_id });
+      const result = await executeTool(fnName, fnArgs, {
+        sessionId,
+        chatId,
+        threadId: msg.message_thread_id,
+        client,
+        model: currentConfig.model,
+        onSubagentProgress: async ({ role, step, total, tool, args }) => {
+          if (isPrivate) {
+            const actionDesc = describeToolCall(tool, args);
+            await sendDraft(
+              chatId,
+              turnDraftId,
+              `🤖 [Subagent: ${role}] Langkah ${step}/${total}: ${actionDesc}`,
+              msg.message_thread_id
+            );
+          }
+        }
+      });
       console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
 
       if (isPrivate) {
