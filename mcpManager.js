@@ -11,6 +11,7 @@ const path = require("path");
 const { Client } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js");
 const { StdioClientTransport } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js");
 const { resolveInWorkspace } = require("./lib/pathGuard");
+const { fixMcpArgs, describeArgsShape } = require("./lib/mcpArgs");
 
 const CONFIG_PATH = path.join(__dirname, "mcp_servers.json");
 
@@ -213,16 +214,21 @@ async function callMcpTool(name, args = {}, context = {}) {
       }
     }
 
+    // Betulkan kesalahan argumen yang sudah dikenal (mis. revisesThought: 0) sebelum dikirim,
+    // supaya model tidak membuang satu langkah untuk mengulang panggilan.
+    const { args: callArgs, fixes } = fixMcpArgs(originalName, cleanArgs);
+    if (fixes.length) console.log(`[MCP] Argumen '${name}' dibetulkan: ${fixes.join("; ")}`);
+
     // Kalau proses MCP mati (crash/OOM), sambung ulang sekali lalu ulangi panggilannya.
     let result;
     try {
       const client = await getLiveClient(serverName);
-      result = await client.callTool({ name: originalName, arguments: cleanArgs });
+      result = await client.callTool({ name: originalName, arguments: callArgs });
     } catch (err) {
       if (!isConnectionError(err)) throw err;
       console.warn(`[MCP] Panggilan '${name}' gagal karena koneksi putus (${err.message}); mencoba sambung ulang.`);
       const client = await getLiveClient(serverName, { forceReconnect: true });
-      result = await client.callTool({ name: originalName, arguments: cleanArgs });
+      result = await client.callTool({ name: originalName, arguments: callArgs });
     }
 
     const parts = result.content || [];
@@ -275,6 +281,14 @@ async function callMcpTool(name, args = {}, context = {}) {
         .map((img) => `📸 [Screenshot berhasil disimpan di /workspace/artifacts/${img.fileName} dan dikirim ke Telegram]`)
         .join("\n");
       textOutput = (textOutput ? textOutput + "\n\n" : "") + imgNote;
+    }
+
+    // Log penuh kalau server menolak panggilan (log ringkas di bot memotong pesan di 200 karakter).
+    if (result.isError) {
+      console.warn(
+        `[MCP] '${name}' ditolak server '${serverName}': ${textOutput.slice(0, 1500)}\n` +
+          `[MCP]   bentuk argumen: ${describeArgsShape(callArgs)}`
+      );
     }
 
     if (!textOutput) {
