@@ -54,9 +54,11 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
    - Membuka URL publik HTTPS instan (`https://*.trycloudflare.com`) via `cloudflared` untuk aplikasi web yang berjalan di port lokal (misal port 3000/8080).
 
 6. **⏰ Scheduled Reminders & Website Watchdog**:
-   - Menjadwalkan pengingat waktu (Reminder) dan pemantau uptime server/website (Watchdog) dengan notifikasi Telegram otomatis.
-   - Data tersimpan persisten di `scheduler_data.json`.
-   - Perintah Telegram: `/tasks` dan `/canceltask <id>`.
+   - Pengingat sekali jalan atau berulang (harian, hari kerja, mingguan, bulanan), dengan waktu relatif
+     ("15 menit lagi") atau jam absolut ("besok 08:00", default WIB).
+   - Pemantau uptime server/website (Watchdog) dengan notifikasi Telegram otomatis.
+   - Data tersimpan di `scheduler_data.json` (ditulis atomik); pengingat baru dihapus setelah benar-benar terkirim.
+   - Perintah Telegram: `/tasks` (dengan tombol batal per tugas) dan `/canceltask <id>`.
 
 7. **🎬 Media Downloader & Converter**:
    - Unduh video/audio dari YouTube, TikTok, Instagram, Twitter/X, SoundCloud menggunakan `yt-dlp` dan `ffmpeg`.
@@ -67,16 +69,30 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 
 ```
 /root/nroz/
-├── bot.js                  # Engine utama Telegram Bot & Agent Loop
-├── agentTools.js           # Definisi tool-calling (OpenAI format) & executor
+├── bot.js                  # Titik masuk: membuat bot, memasang handler, menu perintah
+├── bot/                    # Isi bot Telegram
+│   ├── agentLoop.js        #   Loop tool-calling AI + checkpoint giliran terpotong ("lanjutkan")
+│   ├── turnQueue.js        #   Antrean: satu giliran AI per chat/topic, sisanya menunggu
+│   ├── queuedTurn.js       #   Pembungkus handler agar lewat antrean (+ notifikasi "masuk antrean")
+│   ├── commands.js         #   Perintah slash + daftar menu (setMyCommands)
+│   ├── callbacks.js        #   Tombol inline: approval user, batalkan tugas
+│   ├── handlers.js         #   Pesan teks, foto, dokumen, suara
+│   ├── send.js, text.js    #   Kirim pesan (fallback Markdown, pemecahan pesan panjang)
+│   ├── fileDelivery.js     #   Kiriman file/ZIP dari jawaban AI (hanya dari workspace)
+│   ├── renderDelivery.js   #   Progres & hasil render video
+│   └── workspace.js        #   Folder workspace & auto-cleanup
+├── agentTools.js           # Pintu masuk tool-calling (executeTool)
+├── tools/                  # Implementasi tiap tool (shell, web, files, media, scheduling, ...)
+├── lib/                    # pathGuard (kunci akses file ke workspace), netGuard (anti-SSRF), atomicFile
+├── test/                   # Unit test (node:test) — jalankan `npm test`
 ├── sandboxManager.js       # Manajemen container Docker sandbox per user
 ├── Dockerfile.sandbox      # Definisi image sandbox (Ubuntu 24.04 + tools)
-├── remotionManager.js      # Pengelola render video Remotion
+├── remotionManager.js      # Pengelola render video Remotion (antrean tersimpan di render_queue.json)
 ├── remotion-engine/        # Proyek Remotion (React, bundler, Chrome Headless Shell)
 ├── ttsManager.js           # Text-to-Speech (Edge Neural Voices)
 ├── voiceManager.js         # Transkripsi suara Whisper wrapper
 ├── voiceTranscriber.py     # Script Python Faster-Whisper
-├── schedulerManager.js     # Penjadwal pengingat & watchdog web
+├── schedulerManager.js     # Pengingat (sekali/berulang) & watchdog web
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
 ├── onlyxHelper.js          # Helper database memori percakapan Onlyx DB
 ├── videoShareManager.js    # Link unduhan untuk hasil render di atas batas upload bot
@@ -84,6 +100,15 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── .env.example            # Template variabel lingkungan
 └── package.json            # Dependensi Node.js
 ```
+
+### Batas keamanan tool yang berjalan di host
+
+- `file_read/write/edit/list`, `send_file`, `send_photo`, dan tag `<<<SENDFILE:...>>>` hanya bisa menyentuh
+  workspace sesi (`/workspace/...`). Path lain dan symlink yang keluar dari workspace ditolak.
+- `http_request`, `read_url`, `media_download`, dan watchdog menolak alamat internal (localhost, IP privat,
+  jaringan Docker, `169.254.169.254`), termasuk lewat redirect. Browser MCP memblokir origin yang sama
+  (`--blocked-origins` di `mcp_servers.json`) dan `file://`.
+- `yt-dlp` dijalankan tanpa shell (argumen terpisah), jadi URL tidak bisa menyisipkan perintah.
 
 ---
 
@@ -205,10 +230,12 @@ pm2 startup systemd -u root --hp /root   # opsional: auto-start setelah reboot
 
 - `/start` : Menampilkan menu utama dan fitur bot
 - `/newtopic` : Memulai topik / sesi baru (membersihkan konteks percakapan)
+- `/stop` : Menghentikan pekerjaan AI yang sedang berjalan sekaligus membatalkan pesan yang menunggu di antrean
+  (pesan yang dikirim saat AI masih bekerja diproses berurutan; maksimal 5 menunggu, ubah lewat `TURN_QUEUE_MAX`)
 - `/workspace` : Memeriksa daftar file di workspace server pengguna
 - `/sandbox` : Memeriksa status container Docker sandbox pribadi
 - `/resetsandbox` : Mereset container sandbox jika terjadi kendala sistem
-- `/tasks` : Melihat jadwal pengingat dan pemantau web yang sedang aktif
+- `/tasks` : Melihat (dan membatalkan lewat tombol) pengingat dan pemantau web yang aktif
 - `/canceltask <id>` : Membatalkan tugas pengingat / pemantau web
 - `/clean` : Membersihkan file di folder workspace pengguna
 - `/summary` : Melihat ringkasan memori percakapan jangka panjang
