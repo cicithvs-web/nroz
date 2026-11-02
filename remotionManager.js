@@ -15,6 +15,8 @@ const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { generateSpeech, generateNarration } = require("./ttsManager.js");
+const { writeJsonAtomic, readJsonSafe } = require("./lib/atomicFile");
+const { resolveInWorkspace } = require("./lib/pathGuard");
 
 const REMOTION_DIR = path.join(__dirname, "remotion-engine");
 const REMOTION_PUBLIC = path.join(REMOTION_DIR, "public");
@@ -51,13 +53,13 @@ function probeVideoDuration(filePath) {
   });
 }
 
-/** /workspace/<file> = file di workspace sesi; tool lain sudah memetakan ini, render tidak boleh kalah. */
-function resolveWorkspacePath(p, userWs) {
-  const clean = String(p).trim();
-  if (clean === "/workspace" || clean.startsWith("/workspace/")) {
-    return path.join(userWs, clean.slice("/workspace".length));
-  }
-  return clean;
+/**
+ * /workspace/<file> = file di workspace sesi. Path di luar workspace dan symlink yang
+ * keluar dari workspace ditolak (null), supaya render tidak bisa membaca file host.
+ */
+function resolveWorkspacePath(p, sessionId) {
+  const res = resolveInWorkspace(String(p), sessionId);
+  return res.ok ? res.path : null;
 }
 
 /**
@@ -65,7 +67,7 @@ function resolveWorkspacePath(p, userWs) {
  * di /workspace akan 404 di tengah render. Disalin ke public sebelum render dimulai.
  * @returns {{copied: string[], missing: string[]}}
  */
-function stageStaticAssets(code, userWs) {
+function stageStaticAssets(code, sessionId) {
   const copied = [];
   const missing = [];
   const names = new Set();
@@ -81,8 +83,8 @@ function stageStaticAssets(code, userWs) {
     }
     const dest = path.join(REMOTION_PUBLIC, name);
     if (fs.existsSync(dest)) continue;
-    const src = path.join(userWs, name);
-    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+    const src = resolveWorkspacePath(name, sessionId);
+    if (src && fs.existsSync(src) && fs.statSync(src).isFile()) {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
       copied.push(dest);
@@ -224,10 +226,10 @@ async function runRender({
         calculatedDuration = Math.max(calculatedDuration, speechRes.durationSec + 1);
       }
     } else if (audio_path) {
-      const srcAudio = resolveWorkspacePath(audio_path, userWs);
-      if (!fs.existsSync(srcAudio) || !fs.statSync(srcAudio).isFile()) {
+      const srcAudio = resolveWorkspacePath(audio_path, safeSession);
+      if (!srcAudio || !fs.existsSync(srcAudio) || !fs.statSync(srcAudio).isFile()) {
         throw new Error(
-          `audio_path "${audio_path}" tidak ditemukan. Simpan filenya ke /workspace/${path.basename(srcAudio)} ` +
+          `audio_path "${audio_path}" tidak ditemukan. Simpan filenya ke /workspace/${path.basename(String(audio_path))} ` +
           `lewat run_command/file_write dengan nama persis, atau biarkan sistem membuat suaranya lewat tts_text.`
         );
       }
@@ -264,7 +266,7 @@ async function runRender({
 
     // 2b. Siapkan aset staticFile(...) dari workspace sesi + gagal cepat kalau ada yang hilang,
     // supaya tidak berakhir sebagai 404 di tengah render.
-    const staged = stageStaticAssets(cleanCode, userWs);
+    const staged = stageStaticAssets(cleanCode, safeSession);
     stagedAssets = staged.copied;
     if (staged.copied.length) {
       console.log(`[Remotion Assets] ${staged.copied.length} file disalin dari workspace sesi ke public/.`);
@@ -580,31 +582,45 @@ registerRoot(RemotionRoot);
 const FRAME_SECONDS = Number(process.env.REMOTION_FRAME_SECONDS) || 0.35;
 const MAX_TRACKED_JOBS = 50;
 
+// Antrean disimpan ke disk supaya job yang sedang/akan dirender tidak hilang saat bot restart.
+const QUEUE_FILE = process.env.REMOTION_QUEUE_FILE || path.join(REMOTION_DIR, "render_queue.json");
+
 const renderJobs = new Map();
 let jobCounter = 0;
 let queueTail = Promise.resolve();
 let completeHandler = null;
 
-function queueRender(options, meta = {}) {
-  const { durSec, frames } = clampDurationFps(options.durationSeconds, options.fps);
+// Job dari sesi sebelumnya yang belum selesai; dijalankan ulang lewat resumePersistedJobs().
+let pendingResume = [];
+(() => {
+  const saved = readJsonSafe(QUEUE_FILE, null);
+  if (!saved) return;
+  jobCounter = Number(saved.jobCounter) || 0;
+  pendingResume = Array.isArray(saved.jobs) ? saved.jobs : [];
+})();
 
-  const job = {
-    id: ++jobCounter,
-    options,
-    chatId: meta.chatId ?? null,
-    threadId: meta.threadId ?? null,
-    duration: durSec,
-    frames,
-    waitSec: 0,
-    estimateSec: Math.round(frames * FRAME_SECONDS),
-    status: "queued",
-    queuedAt: Date.now(),
-    startedAt: null,
-    finishedAt: null,
-    progress: null,
-    result: null
-  };
+function persistQueue() {
+  const jobs = [...renderJobs.values()]
+    .filter((j) => j.status === "queued" || j.status === "rendering")
+    .map((j) => {
+      const { onProgress, onMeta, ...options } = j.options || {};
+      return {
+        id: j.id,
+        options,
+        chatId: j.chatId,
+        threadId: j.threadId,
+        status: j.status,
+        queuedAt: j.queuedAt
+      };
+    });
+  try {
+    writeJsonAtomic(QUEUE_FILE, { jobCounter, jobs });
+  } catch (err) {
+    console.warn("[Remotion Queue] Gagal menyimpan antrean ke disk:", err.message);
+  }
+}
 
+function enqueueJob(job) {
   renderJobs.set(job.id, job);
   for (const oldId of renderJobs.keys()) {
     if (renderJobs.size <= MAX_TRACKED_JOBS) break;
@@ -618,17 +634,72 @@ function queueRender(options, meta = {}) {
   );
   const position = activeEarlier.length + 1;
   job.waitSec = activeEarlier.reduce((sum, j) => sum + j.estimateSec, 0);
+  persistQueue();
 
   queueTail = queueTail.then(() => runJob(job)).catch((err) => {
     console.error(`[Remotion Queue] Job #${job.id} runtuh:`, err.message);
   });
 
+  return position;
+}
+
+function newJob(id, options, meta = {}) {
+  const { durSec, frames } = clampDurationFps(options.durationSeconds, options.fps);
+  return {
+    id,
+    options,
+    chatId: meta.chatId ?? null,
+    threadId: meta.threadId ?? null,
+    duration: durSec,
+    frames,
+    waitSec: 0,
+    estimateSec: Math.round(frames * FRAME_SECONDS),
+    status: "queued",
+    queuedAt: meta.queuedAt || Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    progress: null,
+    result: null,
+    resumed: Boolean(meta.resumed)
+  };
+}
+
+function queueRender(options, meta = {}) {
+  const job = newJob(++jobCounter, options, meta);
+  const position = enqueueJob(job);
   return { job, position };
+}
+
+/**
+ * Menjalankan ulang job yang belum selesai saat bot terakhir berhenti. Render yang
+ * sempat berjalan diulang dari awal (Remotion tidak bisa melanjutkan render setengah jadi).
+ * Panggil SETELAH onRenderComplete/onRenderProgress dipasang.
+ * @returns {Array} job yang dijalankan ulang
+ */
+function resumePersistedJobs() {
+  const resumed = [];
+  for (const saved of pendingResume) {
+    if (!saved || !saved.options || renderJobs.has(saved.id)) continue;
+    const job = newJob(saved.id, saved.options, {
+      chatId: saved.chatId,
+      threadId: saved.threadId,
+      queuedAt: saved.queuedAt,
+      resumed: true
+    });
+    job.wasRendering = saved.status === "rendering";
+    jobCounter = Math.max(jobCounter, job.id);
+    enqueueJob(job);
+    resumed.push(job);
+  }
+  pendingResume = [];
+  if (resumed.length) console.log(`[Remotion Queue] ${resumed.length} job dari sesi sebelumnya dijalankan ulang.`);
+  return resumed;
 }
 
 async function runJob(job) {
   job.status = "rendering";
   job.startedAt = Date.now();
+  persistQueue();
   job.progress = { stage: "preparing", percent: 0, rendered: 0, total: job.frames };
   console.log(`[Remotion Queue] Job #${job.id} mulai: ${job.duration}s, ${job.frames} frame, estimasi ${Math.max(1, Math.round(job.estimateSec / 60))} menit.`);
   notifyProgress(job, job.progress);
@@ -667,6 +738,7 @@ async function runJob(job) {
   }
   job.status = job.result.success ? "done" : "failed";
   job.finishedAt = Date.now();
+  persistQueue();
 
   const elapsedSec = ((job.finishedAt - job.startedAt) / 1000).toFixed(1);
   const perFrame = job.frames > 0 ? (elapsedSec / job.frames).toFixed(3) : "-";
@@ -732,6 +804,7 @@ function getRenderQueueStatus() {
 
 module.exports = {
   queueRender,
+  resumePersistedJobs,
   onRenderComplete,
   onRenderProgress,
   getRenderJob,

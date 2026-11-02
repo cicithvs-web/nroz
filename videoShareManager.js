@@ -148,7 +148,7 @@ async function createShareLink(filePath, meta = {}) {
   ensureServer();
   if (!fs.existsSync(filePath)) throw new Error(`File tidak ditemukan: ${filePath}`);
 
-  const tunnelUrl = await startWebPreview(SHARE_PORT, Math.ceil(TTL_MS / 60_000) + 30);
+  const tunnelUrl = await startWebPreview(SHARE_PORT, Math.ceil(TTL_MS / 60_000) + 30, { allowHost: true });
   const token = crypto.randomBytes(16).toString("hex");
   const stat = fs.statSync(filePath);
 

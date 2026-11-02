@@ -33,40 +33,37 @@ function checkPortOpen(host, port, timeoutMs = 800) {
 }
 
 /**
- * Menentukan IP tujuan tunnel:
- * 1. Jika targetHost diberikan eksplisit -> gunakan itu.
- * 2. Cek apakah port aktif di dalam container sandbox user (docker bridge).
- * 3. Cek apakah port aktif di host 127.0.0.1.
- * 4. Fallback ke container sandbox jika ada sessionId, atau 127.0.0.1 jika tidak.
+ * Menentukan IP tujuan tunnel.
+ *
+ * Tool AI (start_web_preview) HANYA boleh men-tunnel ke container sandbox milik sesinya.
+ * Dulu ada fallback ke 127.0.0.1 di host, sehingga "preview port 42235" bisa membuka
+ * layanan internal VPS (DevTools Chrome, database, dll.) ke internet. Port di host hanya
+ * boleh dibuka oleh kode bot sendiri lewat options.allowHost (misal link unduhan video).
  */
 async function resolveTargetHost(port, options = {}) {
-  const p = Number(port);
-  if (options.targetHost) return options.targetHost;
+  if (options.allowHost) return "127.0.0.1";
 
   const sessionId = options.sessionId;
+  if (!sessionId) {
+    throw new Error("Web preview butuh sesi sandbox; port di server host tidak boleh dibuka.");
+  }
+
   let containerIP = null;
-  if (sessionId) {
-    try {
-      containerIP = getSandboxIP(sessionId);
-    } catch (_) {}
+  try {
+    containerIP = getSandboxIP(sessionId);
+  } catch (_) {}
+  if (!containerIP) {
+    throw new Error(
+      "Container sandbox sesi ini belum berjalan. Jalankan server web-nya dulu di sandbox lewat run_command " +
+      "(dengarkan di 0.0.0.0), lalu panggil start_web_preview lagi."
+    );
   }
 
-  // 1. Cek port di dalam container sandbox user
-  if (containerIP && (await checkPortOpen(containerIP, p))) {
-    return containerIP;
+  // Server yang baru booting mungkin belum membuka port; tetap arahkan ke container sendiri.
+  if (!(await checkPortOpen(containerIP, Number(port)))) {
+    console.log(`[Web Preview] Port ${port} belum terbuka di container ${containerIP}, tunnel tetap diarahkan ke sana.`);
   }
-
-  // 2. Cek port di host (127.0.0.1)
-  if (await checkPortOpen("127.0.0.1", p)) {
-    return "127.0.0.1";
-  }
-
-  // 3. Fallback: bila belum open (server baru mau booting) tapi ada sandbox, arahkan ke container
-  if (containerIP) {
-    return containerIP;
-  }
-
-  return "127.0.0.1";
+  return containerIP;
 }
 
 async function startWebPreview(port, durationMinutes = 30, options = {}) {
@@ -87,9 +84,10 @@ async function startWebPreview(port, durationMinutes = 30, options = {}) {
     activeTunnels.delete(key);
   }
 
-  // Jika port ini sebelumnya ditunnel ke targetHost lain, hentikan tunnel lama
-  for (const [k, item] of Array.from(activeTunnels.entries())) {
-    if (item.port === p) {
+  // Jika port ini sebelumnya ditunnel ke tujuan lain OLEH PEMILIK YANG SAMA, hentikan tunnel lama.
+  // (Dulu tunnel milik sesi lain dengan nomor port sama ikut dimatikan.)
+  for (const item of Array.from(activeTunnels.values())) {
+    if (item.port === p && item.targetHost !== targetHost && (item.owner || null) === (options.sessionId || null)) {
       stopWebPreview(p, item.targetHost);
     }
   }
@@ -124,6 +122,7 @@ async function startWebPreview(port, durationMinutes = 30, options = {}) {
           url: urlFound,
           port: p,
           targetHost,
+          owner: options.sessionId || null,
           startedAt: Date.now(),
           timer
         });
@@ -189,5 +188,6 @@ process.on("exit", () => {
 module.exports = {
   startWebPreview,
   stopWebPreview,
-  listActivePreviews
+  listActivePreviews,
+  _resolveTargetHost: resolveTargetHost
 };

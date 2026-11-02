@@ -19,3 +19,7 @@ remotion-engine/public/*.wav
 Thumbs.db
 .playwright-mcp/
 .qoder/
+
+# Antrean render yang belum selesai (dipulihkan saat bot restart)
+remotion-engine/render_queue.json
+scheduler_data.json.corrupt-*

@@ -15,11 +15,38 @@
 
 const fs = require("fs");
 const path = require("path");
+const { isInside } = require("./lib/pathGuard");
 
 const WORKSPACE_BASE = path.join(__dirname, "workspace");
 
 function getSafeSessionId(sessionId) {
   return String(sessionId || "default").trim().replace(/[^a-zA-Z0-9_\-]/g, "_");
+}
+
+/**
+ * Sandbox (root di container) bisa mengganti folder seperti uploads/ dengan symlink ke path
+ * host (misal /root/.ssh). Bot menulis ke folder ini dari HOST, jadi symlink yang keluar dari
+ * workspace dihapus (hanya link-nya, bukan targetnya) lalu folder aslinya dibuat ulang.
+ */
+function ensureRealDirInside(dir, baseDir) {
+  try {
+    const st = fs.lstatSync(dir);
+    if (st.isSymbolicLink()) {
+      let target = null;
+      try {
+        target = fs.realpathSync(dir);
+      } catch (_) {}
+      if (!target || !isInside(target, fs.realpathSync(baseDir))) {
+        console.warn(`[Workspace Memory] Symlink ${dir} -> ${target} keluar dari workspace, diganti folder biasa.`);
+        fs.unlinkSync(dir);
+      }
+    } else if (!st.isDirectory()) {
+      fs.rmSync(dir, { force: true });
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 /**
@@ -40,11 +67,10 @@ function ensureWorkspaceStructure(sessionId) {
   const decisionsFile = path.join(memoryDir, "decisions.md");
   const projectContextFile = path.join(memoryDir, "project_context.md");
 
-  // Buat semua direktori jika belum ada
-  for (const dir of [baseDir, uploadsDir, workDir, artifactsDir, memoryDir, rawDir]) {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+  // Buat semua direktori jika belum ada (dan pastikan bukan symlink ke luar workspace)
+  if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
+  for (const dir of [uploadsDir, workDir, artifactsDir, memoryDir, rawDir]) {
+    ensureRealDirInside(dir, baseDir);
   }
 
   // Buat file template decisions.md jika belum ada
@@ -238,11 +264,85 @@ function getInjectedMemoryContext(sessionId) {
       }
     }
 
+    const checkpoint = formatTurnCheckpoint(loadTurnCheckpoint(sessionId));
+    if (checkpoint) {
+      parts.push(`[Pekerjaan Tertunda dari Giliran Sebelumnya]:\n${checkpoint}`);
+    }
+
     return parts.join("\n\n");
   } catch (err) {
     console.warn(`[Workspace Memory] Gagal memuat memory inject untuk sesi ${sessionId}:`, err.message);
     return "";
   }
+}
+
+/**
+ * CHECKPOINT GILIRAN YANG TERPOTONG
+ *
+ * Riwayat Onlyx hanya menyimpan jawaban final, bukan tool call. Kalau giliran berhenti
+ * sebelum selesai (batas langkah, /stop, atau error AI), langkah yang sudah dikerjakan
+ * disimpan di .memory/last_turn.json lalu diselipkan ke system prompt giliran berikutnya,
+ * supaya "lanjutkan" benar-benar meneruskan dari titik terakhir. Checkpoint dihapus begitu
+ * ada giliran yang selesai normal.
+ */
+const CHECKPOINT_MAX_STEPS = 60;
+const CHECKPOINT_STATUS_LABEL = {
+  limit: "berhenti karena batas langkah maraton tercapai",
+  stopped: "dihentikan user lewat /stop",
+  error: "terputus karena AI gagal dihubungi"
+};
+
+function checkpointFile(sessionId) {
+  return path.join(ensureWorkspaceStructure(sessionId).memoryDir, "last_turn.json");
+}
+
+function saveTurnCheckpoint(sessionId, { status, userRequest, steps, lastAssistantNote }) {
+  try {
+    const data = {
+      status,
+      userRequest: String(userRequest || "").slice(0, 800),
+      steps: (steps || []).slice(-CHECKPOINT_MAX_STEPS),
+      totalSteps: (steps || []).length,
+      lastAssistantNote: String(lastAssistantNote || "").slice(0, 600),
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(checkpointFile(sessionId), JSON.stringify(data, null, 2), "utf-8");
+    return data;
+  } catch (err) {
+    console.warn(`[Workspace Memory] Gagal menyimpan checkpoint sesi ${sessionId}:`, err.message);
+    return null;
+  }
+}
+
+function loadTurnCheckpoint(sessionId) {
+  try {
+    const file = checkpointFile(sessionId);
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearTurnCheckpoint(sessionId) {
+  try {
+    fs.rmSync(checkpointFile(sessionId), { force: true });
+  } catch (_) {}
+}
+
+/** Teks checkpoint untuk system prompt. */
+function formatTurnCheckpoint(cp) {
+  if (!cp || !Array.isArray(cp.steps)) return "";
+  const skipped = (cp.totalSteps || cp.steps.length) - cp.steps.length;
+  const lines = cp.steps.map((s) => `${s.n}. ${s.ok ? "✅" : "❌"} ${s.desc}${s.result ? ` → ${s.result}` : ""}`);
+  return [
+    `Giliran sebelumnya ${CHECKPOINT_STATUS_LABEL[cp.status] || cp.status} (${cp.savedAt}).`,
+    `Permintaan user saat itu: ${cp.userRequest || "-"}`,
+    `Langkah yang sudah dikerjakan (${cp.totalSteps || cp.steps.length} total${skipped > 0 ? `, ${skipped} langkah awal tidak ditampilkan` : ""}):`,
+    ...lines,
+    cp.lastAssistantNote ? `Catatan terakhir AI: ${cp.lastAssistantNote}` : "",
+    "Jika user meminta lanjut, teruskan dari langkah terakhir. Jangan ulangi langkah yang sudah ✅ kecuali perlu diverifikasi; perbaiki langkah ❌ lebih dulu."
+  ].filter(Boolean).join("\n");
 }
 
 module.exports = {
@@ -252,5 +352,9 @@ module.exports = {
   updateProjectContext,
   searchRawMemory,
   getInjectedMemoryContext,
+  saveTurnCheckpoint,
+  loadTurnCheckpoint,
+  clearTurnCheckpoint,
+  formatTurnCheckpoint,
   WORKSPACE_BASE
 };

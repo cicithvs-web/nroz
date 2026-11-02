@@ -10,13 +10,21 @@ const fs = require("fs");
 const path = require("path");
 const { Client } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js");
 const { StdioClientTransport } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js");
+const { resolveInWorkspace } = require("./lib/pathGuard");
 
 const CONFIG_PATH = path.join(__dirname, "mcp_servers.json");
 
-// Peta client aktif: serverName -> { client, transport, tools: [] }
+// Peta client aktif: serverName -> { client, transport, tools: [], alive: boolean }
 const activeServers = new Map();
 
-// Peta nama tool ke handler eksekusi: toolName -> { serverName, originalName, client }
+// Konfigurasi tiap server, disimpan untuk reconnect: serverName -> serverCfg
+const serverConfigs = new Map();
+
+// Reconnect yang sedang berjalan (agar panggilan paralel tidak membuka banyak proses): serverName -> Promise
+const reconnecting = new Map();
+
+// Peta nama tool ke handler eksekusi: toolName -> { serverName, originalName }
+// Client tidak disimpan di sini karena bisa diganti saat reconnect.
 const mcpToolsRegistry = new Map();
 
 // Definisi tool format OpenAI untuk digabungkan ke TOOL_DEFINITIONS
@@ -39,6 +47,100 @@ function loadMcpConfig() {
 }
 
 /**
+ * Membuka satu koneksi ke MCP server dan menandainya mati saat transport tertutup
+ * (misalnya proses Playwright crash), supaya panggilan berikutnya menyambung ulang.
+ */
+async function connectServer(serverName, serverCfg) {
+  const env = { ...process.env, ...(serverCfg.env || {}) };
+  const transport = new StdioClientTransport({
+    command: serverCfg.command || "npx",
+    args: serverCfg.args || [],
+    env
+  });
+
+  const client = new Client(
+    { name: `nroz-${serverName}-client`, version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  await client.connect(transport);
+  const listRes = await client.listTools();
+  const entry = { client, transport, tools: listRes.tools || [], alive: true };
+  client.onclose = () => {
+    if (entry.alive) console.warn(`[MCP] ⚠️ Koneksi server '${serverName}' tertutup; akan disambung ulang saat dipakai.`);
+    entry.alive = false;
+  };
+  activeServers.set(serverName, entry);
+  return entry;
+}
+
+/** Client yang hidup untuk server ini; menyambung ulang kalau koneksinya sudah mati. */
+async function getLiveClient(serverName, { forceReconnect = false } = {}) {
+  const entry = activeServers.get(serverName);
+  if (entry && entry.alive && !forceReconnect) return entry.client;
+
+  if (!reconnecting.has(serverName)) {
+    const cfg = serverConfigs.get(serverName);
+    if (!cfg) throw new Error(`Konfigurasi MCP server '${serverName}' tidak ditemukan.`);
+    const p = (async () => {
+      if (entry) {
+        entry.alive = false;
+        try {
+          await entry.client.close();
+        } catch (_) {}
+      }
+      console.log(`[MCP] Menyambung ulang server '${serverName}'...`);
+      const fresh = await connectServer(serverName, cfg);
+      console.log(`[MCP] ✅ Server '${serverName}' tersambung kembali (${fresh.tools.length} tool).`);
+      return fresh.client;
+    })().finally(() => reconnecting.delete(serverName));
+    reconnecting.set(serverName, p);
+  }
+  return reconnecting.get(serverName);
+}
+
+/** Error yang berarti koneksi ke proses MCP putus (bukan error dari tool itu sendiri). */
+function isConnectionError(err) {
+  return /connection closed|not connected|EPIPE|ECONNRESET|transport|write after end|process exited/i.test(
+    String(err?.message || err)
+  );
+}
+
+function registerServerTools(serverName, serverCfg, tools) {
+  for (const t of tools) {
+    // Standarisasi nama tool
+    let toolName = t.name;
+    if (serverCfg.toolPrefix !== undefined) {
+      if (serverCfg.toolPrefix === false || serverCfg.toolPrefix === "") {
+        toolName = t.name;
+      } else {
+        toolName = `${serverCfg.toolPrefix}${t.name}`;
+      }
+    } else if (!toolName.startsWith(`${serverName}_`) && !toolName.startsWith(serverName)) {
+      toolName = `${serverName}_${t.name}`;
+    }
+
+    const reg = { serverName, originalName: t.name };
+    mcpToolsRegistry.set(toolName, reg);
+    // Daftarkan juga alias originalName jika berbeda, agar fleksibel
+    if (toolName !== t.name) mcpToolsRegistry.set(t.name, reg);
+    // Daftarkan alias sequential_thinking jika nama aslinya sequentialthinking
+    if (toolName === "sequentialthinking" || t.name === "sequentialthinking") {
+      mcpToolsRegistry.set("sequential_thinking", reg);
+    }
+
+    mcpToolDefinitions.push({
+      type: "function",
+      function: {
+        name: toolName,
+        description: `[MCP: ${serverName}] ${t.description || "Tool dari MCP server"}`,
+        parameters: t.inputSchema || { type: "object", properties: {} }
+      }
+    });
+  }
+}
+
+/**
  * Menginisialisasi dan menghubungkan seluruh MCP Server yang aktif
  */
 async function initMCP() {
@@ -54,74 +156,12 @@ async function initMCP() {
       continue;
     }
 
+    serverConfigs.set(serverName, serverCfg);
     try {
       console.log(`[MCP] Memulai koneksi ke server '${serverName}'...`);
-      const env = { ...process.env, ...(serverCfg.env || {}) };
-      const transport = new StdioClientTransport({
-        command: serverCfg.command || "npx",
-        args: serverCfg.args || [],
-        env
-      });
-
-      const client = new Client(
-        { name: `nroz-${serverName}-client`, version: "1.0.0" },
-        { capabilities: { tools: {} } }
-      );
-
-      await client.connect(transport);
-
-      const listRes = await client.listTools();
-      const tools = listRes.tools || [];
-
-      activeServers.set(serverName, { client, transport, tools });
-
-      for (const t of tools) {
-        // Standarisasi nama tool
-        let toolName = t.name;
-        if (serverCfg.toolPrefix !== undefined) {
-          if (serverCfg.toolPrefix === false || serverCfg.toolPrefix === "") {
-            toolName = t.name;
-          } else {
-            toolName = `${serverCfg.toolPrefix}${t.name}`;
-          }
-        } else if (!toolName.startsWith(`${serverName}_`) && !toolName.startsWith(serverName)) {
-          toolName = `${serverName}_${t.name}`;
-        }
-
-        mcpToolsRegistry.set(toolName, {
-          serverName,
-          originalName: t.name,
-          client
-        });
-
-        // Daftarkan juga alias originalName jika berbeda, agar fleksibel
-        if (toolName !== t.name) {
-          mcpToolsRegistry.set(t.name, {
-            serverName,
-            originalName: t.name,
-            client
-          });
-        }
-        // Daftarkan alias sequential_thinking jika nama aslinya sequentialthinking
-        if (toolName === "sequentialthinking" || t.name === "sequentialthinking") {
-          mcpToolsRegistry.set("sequential_thinking", {
-            serverName,
-            originalName: t.name,
-            client
-          });
-        }
-
-        mcpToolDefinitions.push({
-          type: "function",
-          function: {
-            name: toolName,
-            description: `[MCP: ${serverName}] ${t.description || "Tool dari MCP server"}`,
-            parameters: t.inputSchema || { type: "object", properties: {} }
-          }
-        });
-      }
-
-      console.log(`[MCP] ✅ Server '${serverName}' berhasil terhubung (${tools.length} tool aktif).`);
+      const entry = await connectServer(serverName, serverCfg);
+      registerServerTools(serverName, serverCfg, entry.tools);
+      console.log(`[MCP] ✅ Server '${serverName}' berhasil terhubung (${entry.tools.length} tool aktif).`);
     } catch (err) {
       console.error(`[MCP] ❌ Gagal menghubungkan server '${serverName}':`, err.message);
     }
@@ -160,7 +200,7 @@ async function callMcpTool(name, args = {}, context = {}) {
     return `❌ Tool MCP '${name}' tidak terdaftar.`;
   }
 
-  const { client, originalName, serverName } = reg;
+  const { originalName, serverName } = reg;
 
   try {
     // Sanitasi args: pastikan hanya field primitif/serializable yang diteruskan ke MCP transport
@@ -173,10 +213,17 @@ async function callMcpTool(name, args = {}, context = {}) {
       }
     }
 
-    const result = await client.callTool({
-      name: originalName,
-      arguments: cleanArgs
-    });
+    // Kalau proses MCP mati (crash/OOM), sambung ulang sekali lalu ulangi panggilannya.
+    let result;
+    try {
+      const client = await getLiveClient(serverName);
+      result = await client.callTool({ name: originalName, arguments: cleanArgs });
+    } catch (err) {
+      if (!isConnectionError(err)) throw err;
+      console.warn(`[MCP] Panggilan '${name}' gagal karena koneksi putus (${err.message}); mencoba sambung ulang.`);
+      const client = await getLiveClient(serverName, { forceReconnect: true });
+      result = await client.callTool({ name: originalName, arguments: cleanArgs });
+    }
 
     const parts = result.content || [];
     let textOutput = "";
@@ -188,7 +235,9 @@ async function callMcpTool(name, args = {}, context = {}) {
       } else if (part.type === "image" && part.data) {
         try {
           const sessionId = context.sessionId || "default";
-          const artifactsDir = path.join(__dirname, "workspace", String(sessionId), "artifacts");
+          const guard = resolveInWorkspace("/workspace/artifacts", sessionId);
+          if (!guard.ok) throw new Error(guard.error);
+          const artifactsDir = guard.path;
           if (!fs.existsSync(artifactsDir)) {
             fs.mkdirSync(artifactsDir, { recursive: true });
           }
@@ -243,6 +292,7 @@ async function callMcpTool(name, args = {}, context = {}) {
  */
 async function closeAllMcp() {
   for (const [serverName, s] of activeServers.entries()) {
+    s.alive = false;
     try {
       await s.client.close();
       console.log(`[MCP] Server '${serverName}' ditutup.`);
