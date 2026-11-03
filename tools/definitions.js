@@ -495,7 +495,8 @@ const TOOL_DEFINITIONS = [
       name: "record_decision",
       description:
         "Mencatat keputusan, kesepakatan, atau pilihan yang telah ditentukan oleh user (contoh: user memilih Opsi B, user memilih library Tailwind, user menentukan arsitektur atau aturan khusus). " +
-        "Catatan ini disimpan permanen di .memory/decisions.md dan otomatis diselipkan ke sistem prompt AI di percakapan berikutnya agar tidak pernah lupa.",
+        "Catatan ini disimpan permanen di .memory/decisions.md dan otomatis diselipkan ke sistem prompt AI di percakapan berikutnya agar tidak pernah lupa. " +
+        "Tiap keputusan punya nomor (#N) yang terlihat di memori. Jika keputusan baru MENGGANTIKAN yang lama (user berubah pikiran), isi 'supersedes' dengan nomor keputusan lama.",
       parameters: {
         type: "object",
         properties: {
@@ -507,8 +508,37 @@ const TOOL_DEFINITIONS = [
             type: "string",
             description: "Kategori keputusan (misal: 'Arsitektur', 'Desain/UI', 'Database', 'Preferensi User', 'Umum'). Default: 'Umum'",
           },
+          supersedes: {
+            type: "number",
+            description: "Opsional. Nomor (#N) keputusan lama yang digantikan oleh keputusan baru ini; keputusan lama otomatis dicabut.",
+          },
         },
         required: ["decision"],
+      },
+    },
+  },
+
+  // --- o2) forget_decision ---
+  {
+    type: "function",
+    function: {
+      name: "forget_decision",
+      description:
+        "Mencabut keputusan lama di .memory/decisions.md yang sudah tidak berlaku (user membatalkan tanpa penggantinya, atau keputusan keliru). " +
+        "Entri tetap tersimpan sebagai riwayat tetapi tidak lagi diselipkan ke memori. Jika ada pengganti, pakai record_decision dengan 'supersedes'.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "number",
+            description: "Nomor (#N) keputusan yang dicabut, sesuai daftar di memori keputusan.",
+          },
+          reason: {
+            type: "string",
+            description: "Opsional. Alasan singkat pencabutan.",
+          },
+        },
+        required: ["id"],
       },
     },
   },
@@ -562,11 +592,13 @@ const TOOL_DEFINITIONS = [
         properties: {
           query: {
             type: "string",
-            description: "Kata kunci atau topik yang ingin dicari di arsip riwayat percakapan.",
+            description:
+              "Beberapa kata kunci penting (tanpa kata sambung), contoh: 'database sqlite alasan'. Pesan dicocokkan jika memuat minimal separuh kata di posisi mana pun, " +
+              "dan hasil diurutkan dari yang paling relevan. Jika kosong, coba sinonim atau kata lain (mis. 'sqlite' alih-alih 'database').",
           },
           limit: {
             type: "number",
-            description: "Batas jumlah potongan chat relevan yang dikembalikan (default: 5).",
+            description: "Batas jumlah potongan chat relevan yang dikembalikan (default: 5, maksimal 20).",
           },
         },
         required: ["query"],

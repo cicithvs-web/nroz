@@ -8,7 +8,7 @@
  *   tools/files.js        file_read/write/edit/list, send_photo, send_file
  *   tools/media.js        media_download, render_remotion_video, start_web_preview
  *   tools/scheduling.js   create_reminder, create_watchdog
- *   tools/memory.js       record_decision, update_project_context, search_raw_memory
+ *   tools/memory.js       record_decision, forget_decision, update_project_context, search_raw_memory
  *   tools/skills.js       read_skill, save_skill
  *   tools/system.js       system_info
  *   tools/describe.js     ringkasan satu baris tiap tool call untuk draft progres
@@ -84,6 +84,7 @@ const TOOL_HANDLERS = {
   media_download: media.toolMediaDownload,
   render_remotion_video: media.toolRenderRemotionVideo,
   record_decision: memory.toolRecordDecision,
+  forget_decision: memory.toolForgetDecision,
   update_project_context: memory.toolUpdateProjectContext,
   search_raw_memory: memory.toolSearchRawMemory,
   delegate_task: toolDelegateTask,

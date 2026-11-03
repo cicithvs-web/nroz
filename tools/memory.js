@@ -1,20 +1,41 @@
 /**
- * tools/memory.js — Tool memori workspace: record_decision, update_project_context, search_raw_memory.
+ * tools/memory.js — Tool memori workspace: record_decision, forget_decision, update_project_context, search_raw_memory.
  */
 
-const { recordDecision, updateProjectContext, searchRawMemory } = require("../workspaceMemoryManager.js");
+const {
+  recordDecision,
+  revokeDecision,
+  updateProjectContext,
+  searchRawMemory
+} = require("../workspaceMemoryManager.js");
 
 /**
  * Tool: record_decision
- * Mencatat keputusan, kesepakatan, atau pilihan user ke .memory/decisions.md
+ * Mencatat keputusan, kesepakatan, atau pilihan user ke .memory/decisions.md.
+ * Dengan `supersedes`, keputusan lama dengan nomor itu otomatis dicabut.
  */
-async function toolRecordDecision({ decision, category, sessionId }) {
+async function toolRecordDecision({ decision, category, supersedes, sessionId }) {
   if (!decision) return "❌ Parameter 'decision' wajib diisi.";
   try {
-    const res = recordDecision(sessionId || "default", decision, category || "Umum");
-    return `✅ Keputusan berhasil dicatat ke .memory/decisions.md:\n${res.entry}`;
+    const res = recordDecision(sessionId || "default", decision, category || "Umum", supersedes);
+    const replaced = res.replaced ? `\n♻️ Keputusan lama #${res.replaced.id} dicabut (digantikan).` : "";
+    return `✅ Keputusan berhasil dicatat ke .memory/decisions.md:\n${res.entry}${replaced}`;
   } catch (err) {
     return `❌ Gagal mencatat keputusan: ${err.message}`;
+  }
+}
+
+/**
+ * Tool: forget_decision
+ * Mencabut keputusan lama yang sudah tidak berlaku (entri tetap tersimpan sebagai riwayat).
+ */
+async function toolForgetDecision({ id, reason, sessionId }) {
+  if (id === undefined || id === null || id === "") return "❌ Parameter 'id' wajib diisi.";
+  try {
+    const res = revokeDecision(sessionId || "default", id, reason);
+    return `✅ Keputusan #${res.id} dicabut dan tidak akan diselipkan lagi ke memori:\n${res.text}`;
+  } catch (err) {
+    return `❌ Gagal mencabut keputusan: ${err.message}`;
   }
 }
 
@@ -58,4 +79,4 @@ async function toolSearchRawMemory({ query, limit, sessionId }) {
 }
 
 
-module.exports = { toolRecordDecision, toolUpdateProjectContext, toolSearchRawMemory };
+module.exports = { toolRecordDecision, toolForgetDecision, toolUpdateProjectContext, toolSearchRawMemory };

@@ -77,6 +77,8 @@ function describeToolCall(name, args = {}) {
     }
     case "record_decision":
       return `mencatat keputusan: "${oneLine(args.decision, 60)}"`;
+    case "forget_decision":
+      return `mencabut keputusan #${args.id ?? "?"}`;
     case "update_project_context":
       return `memperbarui status proyek: "${oneLine(args.summary, 60)}"`;
     case "search_raw_memory":

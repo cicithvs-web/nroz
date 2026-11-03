@@ -16,6 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const { isInside } = require("./lib/pathGuard");
+const { writeTextAtomic } = require("./lib/atomicFile");
 
 const WORKSPACE_BASE = path.join(__dirname, "workspace");
 
@@ -145,23 +146,96 @@ function appendRawLog(sessionId, role, text, extra = {}) {
 }
 
 /**
+ * Format baris keputusan di decisions.md:
+ *   aktif   : - **[2026-11-02 10:00] [Kategori]**: teks
+ *   dicabut : - ~~**[2026-11-02 10:00] [Kategori]**: teks~~ _(dicabut 2026-11-03 09:00: alasan)_
+ * ID keputusan = urutan kemunculannya (aktif maupun dicabut) mulai dari 1. Entri dicabut tetap
+ * disimpan sebagai riwayat, jadi ID tidak bergeser.
+ */
+const ACTIVE_DECISION_RE = /^- \*\*\[/;
+const REVOKED_DECISION_RE = /^- ~~\*\*\[/;
+const DECISIONS_INJECT_BUDGET = 4000; // karakter
+
+function oneLine(text) {
+  return String(text || "").replace(/\s*[\r\n]+\s*/g, " ").trim();
+}
+
+function parseDecisions(content) {
+  const lines = content.split("\n");
+  const entries = [];
+  lines.forEach((line, lineIdx) => {
+    const active = ACTIVE_DECISION_RE.test(line);
+    if (active || REVOKED_DECISION_RE.test(line)) {
+      entries.push({ id: entries.length + 1, lineIdx, active, line });
+    }
+  });
+  return { lines, entries };
+}
+
+function nowStamp() {
+  return new Date().toISOString().slice(0, 16).replace("T", " ");
+}
+
+/** Daftar keputusan aktif: [{ id, category, text }]. */
+function listActiveDecisions(sessionId) {
+  const { decisionsFile } = ensureWorkspaceStructure(sessionId);
+  const { entries } = parseDecisions(fs.readFileSync(decisionsFile, "utf-8"));
+  return entries
+    .filter((e) => e.active)
+    .map((e) => {
+      const m = e.line.match(/^- \*\*\[[^\]]*\] \[([^\]]*)\]\*\*: (.*)$/);
+      return { id: e.id, category: m ? m[1] : "Umum", text: m ? m[2] : e.line.slice(2) };
+    });
+}
+
+/**
+ * Mencabut keputusan (tidak dihapus, hanya ditandai dicabut agar tetap jadi riwayat).
+ * @returns {{id:number, text:string}} baris yang dicabut
+ */
+function revokeDecision(sessionId, id, reason = "") {
+  const { decisionsFile } = ensureWorkspaceStructure(sessionId);
+  const num = Number(id);
+  if (!Number.isInteger(num) || num < 1) throw new Error("ID keputusan harus berupa angka bulat >= 1.");
+
+  const { lines, entries } = parseDecisions(fs.readFileSync(decisionsFile, "utf-8"));
+  const target = entries.find((e) => e.id === num);
+  if (!target) throw new Error(`Keputusan #${num} tidak ditemukan.`);
+  if (!target.active) throw new Error(`Keputusan #${num} sudah dicabut sebelumnya.`);
+
+  const why = oneLine(reason);
+  lines[target.lineIdx] = `- ~~${target.line.slice(2)}~~ _(dicabut ${nowStamp()}${why ? `: ${why}` : ""})_`;
+  writeTextAtomic(decisionsFile, lines.join("\n"));
+  return { id: num, text: target.line.slice(2) };
+}
+
+/**
  * Menambahkan keputusan / pilihan user ke .memory/decisions.md
  * @param {string} sessionId
  * @param {string} decision - Teks ringkas keputusan user
  * @param {string} [category="Umum"]
+ * @param {number} [supersedes] - ID keputusan lama yang digantikan (otomatis dicabut)
  */
-function recordDecision(sessionId, decision, category = "Umum") {
+function recordDecision(sessionId, decision, category = "Umum", supersedes = null) {
   const { decisionsFile } = ensureWorkspaceStructure(sessionId);
-  const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const cleanDecision = String(decision || "").trim();
+  const cleanDecision = oneLine(decision);
+  const cleanCategory = oneLine(category).replace(/[\[\]]/g, "") || "Umum";
 
   if (!cleanDecision) {
     throw new Error("Teks keputusan (decision) tidak boleh kosong.");
   }
 
-  const entry = `- **[${nowStr}] [${category}]**: ${cleanDecision}\n`;
-  fs.appendFileSync(decisionsFile, entry, "utf-8");
-  return { success: true, entry: entry.trim(), file: decisionsFile };
+  let replaced = null;
+  if (supersedes !== null && supersedes !== undefined && supersedes !== "") {
+    // Dicabut dulu: kalau ID tidak valid, error dilempar sebelum ada yang ditulis.
+    replaced = revokeDecision(sessionId, supersedes, "digantikan keputusan baru");
+  }
+
+  const content = fs.readFileSync(decisionsFile, "utf-8");
+  const id = parseDecisions(content).entries.length + 1;
+  const entry = `- **[${nowStamp()}] [${cleanCategory}]**: ${cleanDecision}`;
+  const prefix = content.endsWith("\n") || content === "" ? "" : "\n";
+  fs.appendFileSync(decisionsFile, `${prefix}${entry}\n`, "utf-8");
+  return { success: true, id, entry: `#${id} ${entry.slice(2)}`, replaced, file: decisionsFile };
 }
 
 /**
@@ -194,46 +268,108 @@ function updateProjectContext(sessionId, { summary, active_files, active_service
   return { success: true, file: projectContextFile };
 }
 
+const SEARCH_STOPWORDS = new Set([
+  "yang", "dan", "di", "ke", "dari", "itu", "ini", "apa", "kita", "kamu", "aku", "saya", "untuk",
+  "dengan", "pada", "adalah", "ada", "atau", "tadi", "kemarin", "dulu", "waktu", "lalu", "tentang",
+  "the", "and", "for", "was", "what", "did", "we", "you", "about"
+]);
+const SEARCH_SNIPPET_CHARS = 600;
+const SEARCH_MAX_LIMIT = 20;
+const SEARCH_MAX_SCANNED_LINES = 20000;
+
+/** Memecah query jadi kata kunci (huruf/angka). Kata umum dibuang, kecuali semuanya kata umum. */
+function tokenizeQuery(query) {
+  const all = [...new Set(String(query || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])]
+    .filter((t) => t.length >= 2);
+  const meaningful = all.filter((t) => !SEARCH_STOPWORDS.has(t));
+  return meaningful.length > 0 ? meaningful : all;
+}
+
+/** Potongan teks ±SEARCH_SNIPPET_CHARS di sekitar kemunculan pertama kata yang cocok. */
+function buildSnippet(content, lower, tokens) {
+  if (content.length <= SEARCH_SNIPPET_CHARS) return content;
+  let pos = -1;
+  for (const t of tokens) {
+    const i = lower.indexOf(t);
+    if (i !== -1 && (pos === -1 || i < pos)) pos = i;
+  }
+  const start = Math.max(0, Math.min(pos - Math.floor(SEARCH_SNIPPET_CHARS / 3), content.length - SEARCH_SNIPPET_CHARS));
+  const end = start + SEARCH_SNIPPET_CHARS;
+  return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
+}
+
 /**
  * Mencari cuplikan percakapan masa lalu di .memory/raw/
+ *
+ * Query dipecah jadi kata kunci; pesan harus memuat minimal separuh kata kunci (di posisi mana pun).
+ * Hasil diurutkan berdasarkan skor: proporsi kata cocok, bonus jika frasa utuh muncul, dan bonus
+ * kecil untuk pesan yang lebih baru. Cuplikan diambil di sekitar kata yang cocok.
  */
 function searchRawMemory(sessionId, query, limit = 5) {
   const { rawDir } = ensureWorkspaceStructure(sessionId);
   if (!fs.existsSync(rawDir)) return [];
 
-  const q = String(query || "").toLowerCase().trim();
-  if (!q) return [];
+  const phrase = String(query || "").toLowerCase().trim();
+  const tokens = tokenizeQuery(query);
+  if (tokens.length === 0) return [];
+  const maxResults = Math.min(Math.max(Math.floor(Number(limit)) || 5, 1), SEARCH_MAX_LIMIT);
+  const minMatched = Math.max(1, Math.ceil(tokens.length / 2));
+  const now = Date.now();
 
   const files = fs.readdirSync(rawDir)
     .filter((f) => f.startsWith("chat_") && f.endsWith(".jsonl"))
     .sort()
     .reverse(); // Terbaru lebih dulu
 
-  const matches = [];
+  const candidates = [];
+  let scanned = 0;
 
-  for (const file of files) {
-    if (matches.length >= limit) break;
-    const fullPath = path.join(rawDir, file);
+  outer: for (const file of files) {
+    let lines;
     try {
-      const lines = fs.readFileSync(fullPath, "utf-8").split("\n").filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (matches.length >= limit) break;
-        try {
-          const entry = JSON.parse(lines[i]);
-          if (entry.content && entry.content.toLowerCase().includes(q)) {
-            matches.push({
-              file,
-              timestamp: entry.timestamp,
-              role: entry.role,
-              content: entry.content.slice(0, 600)
-            });
-          }
-        } catch (_) {}
+      lines = fs.readFileSync(path.join(rawDir, file), "utf-8").split("\n");
+    } catch (_) {
+      continue;
+    }
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i]) continue;
+      if (++scanned > SEARCH_MAX_SCANNED_LINES) break outer;
+
+      // Saringan cepat sebelum JSON.parse: baris harus memuat minimal satu kata kunci.
+      const rawLower = lines[i].toLowerCase();
+      if (!tokens.some((t) => rawLower.includes(t))) continue;
+
+      let entry;
+      try {
+        entry = JSON.parse(lines[i]);
+      } catch (_) {
+        continue;
       }
-    } catch (_) {}
+      if (!entry || typeof entry.content !== "string") continue;
+
+      const lower = entry.content.toLowerCase();
+      const matched = tokens.filter((t) => lower.includes(t));
+      if (matched.length < minMatched) continue;
+
+      const ageDays = Math.max(0, (now - (Date.parse(entry.timestamp) || now)) / 86400_000);
+      const score =
+        matched.length / tokens.length +
+        (phrase && lower.includes(phrase) ? 0.5 : 0) +
+        0.1 / (1 + ageDays / 30);
+
+      candidates.push({
+        file,
+        timestamp: entry.timestamp || "",
+        role: entry.role || "?",
+        content: buildSnippet(entry.content, lower, matched),
+        score
+      });
+    }
   }
 
-  return matches;
+  return candidates
+    .sort((a, b) => b.score - a.score || b.timestamp.localeCompare(a.timestamp))
+    .slice(0, maxResults);
 }
 
 /**
@@ -247,13 +383,26 @@ function getInjectedMemoryContext(sessionId) {
 
     if (fs.existsSync(decisionsFile)) {
       const decContent = fs.readFileSync(decisionsFile, "utf-8").trim();
-      // Hanya sertakan jika ada entri keputusan (ada baris yang diawali dengan '- **[')
-      if (decContent.includes("- **[")) {
-        // Ambil maksimal 15 keputusan terakhir agar tidak terlalu panjang
-        const lines = decContent.split("\n");
-        const header = lines.slice(0, 5).join("\n");
-        const entries = lines.filter((l) => l.startsWith("- **[")).slice(-15).join("\n");
-        parts.push(`[Catatan Keputusan & Pilihan User]:\n${entries}`);
+      const active = parseDecisions(decContent).entries.filter((e) => e.active);
+      if (active.length > 0) {
+        // Semua keputusan aktif disertakan (terbaru diprioritaskan) sampai batas karakter.
+        const picked = [];
+        let used = 0;
+        for (let i = active.length - 1; i >= 0; i--) {
+          const text = `#${active[i].id} ${active[i].line.slice(2)}`;
+          if (picked.length > 0 && used + text.length > DECISIONS_INJECT_BUDGET) break;
+          picked.unshift(text);
+          used += text.length + 1;
+        }
+        const omitted = active.length - picked.length;
+        const note = omitted > 0
+          ? `\n(${omitted} keputusan lama tidak ditampilkan; baca /workspace/.memory/decisions.md jika perlu.)`
+          : "";
+        parts.push(
+          `[Catatan Keputusan & Pilihan User]:\n${picked.join("\n")}${note}\n` +
+          "Jika user mengubah/membatalkan salah satu keputusan di atas, panggil record_decision dengan supersedes=<nomor #> " +
+          "(atau forget_decision) supaya yang lama tidak lagi berlaku."
+        );
       }
     }
 
@@ -279,7 +428,7 @@ function getInjectedMemoryContext(sessionId) {
 /**
  * CHECKPOINT GILIRAN YANG TERPOTONG
  *
- * Riwayat Onlyx hanya menyimpan jawaban final, bukan tool call. Kalau giliran berhenti
+ * Riwayat percakapan hanya menyimpan jawaban final, bukan tool call. Kalau giliran berhenti
  * sebelum selesai (batas langkah, /stop, atau error AI), langkah yang sudah dikerjakan
  * disimpan di .memory/last_turn.json lalu diselipkan ke system prompt giliran berikutnya,
  * supaya "lanjutkan" benar-benar meneruskan dari titik terakhir. Checkpoint dihapus begitu
@@ -349,6 +498,8 @@ module.exports = {
   ensureWorkspaceStructure,
   appendRawLog,
   recordDecision,
+  revokeDecision,
+  listActiveDecisions,
   updateProjectContext,
   searchRawMemory,
   getInjectedMemoryContext,
