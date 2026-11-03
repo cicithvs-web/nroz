@@ -10,6 +10,7 @@ scheduler_data.json
 # Workspace and temporary runtime data
 workspace/
 artifacts/
+backups/
 remotion-engine/renders/
 remotion-engine/public/*.mp3
 remotion-engine/public/*.wav

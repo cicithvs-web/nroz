@@ -1,13 +1,13 @@
 /**
  * bot/config.js — Pengaturan model/Base URL/API key dan client OpenAI aktif.
  *
- * Urutan prioritas: .env < config.json lokal < dokumen bot_config di Onlyx DB.
+ * Urutan prioritas: .env < config.json lokal < tabel bot_config di PostgreSQL.
  */
 
 const fs = require("fs");
 const path = require("path");
 const OpenAI = require("openai");
-const { getBotConfig } = require("../onlyxHelper.js");
+const { getBotConfig } = require("../dbHelper.js");
 const { ROOT_DIR } = require("../lib/paths");
 
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : "7368157605";
@@ -50,7 +50,7 @@ function saveLocalConfig() {
   }
 }
 
-/** Sinkronisasi dari Onlyx DB saat startup. */
+/** Sinkronisasi dari PostgreSQL saat startup. */
 async function syncConfigFromDb() {
   try {
     const remote = await getBotConfig();
@@ -60,7 +60,7 @@ async function syncConfigFromDb() {
       if (remote.model) currentConfig.model = remote.model;
       refreshClient();
       saveLocalConfig();
-      console.log(`[Config] Pengaturan sinkron dari Onlyx DB (Model: ${currentConfig.model})`);
+      console.log(`[Config] Pengaturan sinkron dari PostgreSQL (Model: ${currentConfig.model})`);
     } else {
       console.log(`[Config] Menggunakan pengaturan default (Model: ${currentConfig.model})`);
     }

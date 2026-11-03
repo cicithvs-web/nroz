@@ -1,0 +1,30 @@
+# PostgreSQL lokal untuk memori & konfigurasi bot Nroz.
+# Dijalankan otomatis oleh scripts/setup-vps.sh; manual: docker compose up -d
+# Kredensial dibaca dari .env (POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD).
+# Port hanya terikat ke localhost — tidak bisa diakses dari luar server.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nroz-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nroz}
+      POSTGRES_USER: ${POSTGRES_USER:-nroz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Isi POSTGRES_PASSWORD di .env}
+    volumes:
+      - nroz-pg-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nroz-pg-data:

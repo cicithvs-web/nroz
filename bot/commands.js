@@ -22,8 +22,9 @@ const {
   getUserAccess,
   setUserAccess,
   setChatPaused
-} = require("../onlyxHelper.js");
+} = require("../dbHelper.js");
 const { resetSandbox, getSandboxInfo } = require("../sandboxManager.js");
+const { handleBackup, handleBackupFull, handleRestore } = require("./dbBackup");
 const { listTasks, removeTask, formatInZone, REPEAT_LABEL } = require("../schedulerManager.js");
 const skillsManager = require("../skillsManager.js");
 
@@ -56,7 +57,10 @@ const OWNER_COMMANDS = [
   { command: "resetconfig", description: "👑 Kembalikan pengaturan ke .env" },
   { command: "approve", description: "👑 Setujui akses user" },
   { command: "reject", description: "👑 Tolak/cabut akses user" },
-  { command: "cleanall", description: "👑 Bersihkan workspace lama semua user" }
+  { command: "cleanall", description: "👑 Bersihkan workspace lama semua user" },
+  { command: "backup", description: "👑 Backup database (kirim file .sql)" },
+  { command: "backupfull", description: "👑 Backup penuh: database + workspace (.tar.gz)" },
+  { command: "restore", description: "👑 Restore database dari file .sql" }
 ];
 
 /** Pasang menu perintah: umum untuk semua chat, versi lengkap untuk chat pribadi owner. */
@@ -134,7 +138,7 @@ function registerCommands(bot) {
       "Halo! Saya *Nroz AI Agent* 🤖\n\nSiap membantumu berdiskusi, mengeksekusi kode, memeriksa server VPS, browsing internet, mengelola proyek coding di *Persistent Docker Sandbox* terisolasi, serta berbagai fitur canggih:\n• 🎙️ *Voice Note Transcriber* (bicara langsung via pesan suara)\n• 📊 *Data Analyst & Auto Chart* (grafik & visualisasi data otomatis)\n• 🎥 *Remotion React Video Creator* (bikin video MP4 animasi dari React)\n• 🌐 *Instant Web Preview* (link publik HTTPS live via Cloudflare Tunnel)\n• ⏰ *Pengingat & Pemantau Web* (Reminder & Server Watchdog)\n• 🎬 *Media Downloader & Converter* (yt-dlp & ffmpeg)\n\n*Perintah Tersedia:*\n• /newtopic : Mulai obrolan / topik baru\n• /workspace : Cek daftar file di folder server kamu\n• /sandbox : Cek status container sandbox Docker kamu\n• /resetsandbox : Reset container sandbox jika terjadi error\n• /tasks : Cek jadwal pengingat & pemantau web aktif\n• /clean : Hapus & bersihkan file di workspace kamu\n• /summary : Lihat ringkasan memori percakapan\n• /pause & /resume : Jeda / aktifkan respon bot";
     if (isOwner(msg)) {
       text +=
-        "\n\n👑 *Menu Khusus Owner:*\n• /config : Cek & kelola Model, Base URL, dan API Key\n• /cleanall : Bersihkan semua workspace > 3 hari\n• /approve <id> : Izinkan user manual\n• /reject <id> : Tolak/cabut user manual";
+        "\n\n👑 *Menu Khusus Owner:*\n• /config : Cek & kelola Model, Base URL, dan API Key\n• /cleanall : Bersihkan semua workspace > 3 hari\n• /approve <id> : Izinkan user manual\n• /reject <id> : Tolak/cabut user manual\n• /backup : Backup database (file .sql)\n• /backupfull : Backup penuh database + workspace (.tar.gz)\n• /restore : Restore database dari file backup";
     }
     await replyText(msg, text);
   });
@@ -393,7 +397,7 @@ function registerCommands(bot) {
     if (!state.summary || state.summary.trim().length === 0) {
       return replyText(msg, "ℹ️ Belum ada ringkasan memori untuk topik ini (obrolan masih sedikit atau baru dimulai).");
     }
-    await replyText(msg, `📝 *Ringkasan Memori Topik Saat Ini:*\n\n_${state.summary}_`);
+    await replyText(msg, `📝 *Ringkasan Memori Topik Saat Ini:*\n\n${state.summary}`);
   });
 
   // --- PERINTAH KATALOG SKILL AKTIF (GLOBAL & WORKSPACE) ---
@@ -572,7 +576,7 @@ Kembalikan ke pengaturan awal dari .env`;
     try {
       await saveBotConfig(getConfig());
     } catch (err) {
-      console.warn("[Config] Gagal simpan ke Onlyx DB:", err.message);
+      console.warn("[Config] Gagal simpan ke PostgreSQL:", err.message);
     }
 
     await replyText(msg, `✅ *Model AI berhasil diubah!*\n\nModel aktif sekarang:\n\`${newModel}\``);
@@ -598,7 +602,7 @@ Kembalikan ke pengaturan awal dari .env`;
     try {
       await saveBotConfig(getConfig());
     } catch (err) {
-      console.warn("[Config] Gagal simpan ke Onlyx DB:", err.message);
+      console.warn("[Config] Gagal simpan ke PostgreSQL:", err.message);
     }
 
     await replyText(msg, `✅ *Base URL berhasil diubah!*\n\nBase URL aktif sekarang:\n\`${newUrl}\``);
@@ -630,10 +634,48 @@ Kembalikan ke pengaturan awal dari .env`;
     try {
       await saveBotConfig(getConfig());
     } catch (err) {
-      console.warn("[Config] Gagal simpan ke Onlyx DB:", err.message);
+      console.warn("[Config] Gagal simpan ke PostgreSQL:", err.message);
     }
 
     await replyText(msg, `✅ *API Key berhasil diperbarui!*\n\nAPI Key aktif sekarang:\n\`${maskKey(newKey)}\``);
+  });
+
+  // --- PERINTAH OWNER: BACKUP DATABASE ---
+  bot.onText(/^\/backup(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+    await handleBackup(msg);
+  });
+
+  // --- PERINTAH OWNER: FULL BACKUP (DATABASE + WORKSPACE) ---
+  bot.onText(/^\/backupfull(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+    await handleBackupFull(msg);
+  });
+
+  // --- PERINTAH OWNER: RESTORE DATABASE ---
+  bot.onText(/^\/restore(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+
+    const doc = msg.reply_to_message && msg.reply_to_message.document;
+    if (!doc) {
+      return replyText(
+        msg,
+        "Cara restore database:\n\n" +
+          "1. Kirim file `.sql` hasil /backup dengan caption `/restore`, atau\n" +
+          "2. Reply pesan berisi file backup dengan perintah `/restore`.\n\n" +
+          "⚠️ Data saat ini akan *ditimpa* oleh isi backup."
+        );
+    }
+    await handleRestore(msg, doc);
   });
 
   // --- PERINTAH OWNER: APPROVE PENGGUNA MANUAL ---
@@ -697,7 +739,7 @@ Kembalikan ke pengaturan awal dari .env`;
     try {
       await resetBotConfig();
     } catch (err) {
-      console.warn("[Config] Gagal reset di Onlyx DB:", err.message);
+      console.warn("[Config] Gagal reset di PostgreSQL:", err.message);
     }
 
     await replyText(

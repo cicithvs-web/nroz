@@ -4,7 +4,7 @@
 
 const ctx = require("./context");
 const { OWNER_ID } = require("./config");
-const { getUserAccess, setUserAccess } = require("../onlyxHelper.js");
+const { getUserAccess, setUserAccess } = require("../dbHelper.js");
 const { getTask, removeTask } = require("../schedulerManager.js");
 const { buildTasksMessage } = require("./commands");
 const { getSessionId } = require("./access");

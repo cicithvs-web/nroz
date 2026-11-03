@@ -1,7 +1,7 @@
 {
   "name": "nroz-ai-bot",
   "version": "1.0.0",
-  "description": "Bot Telegram AI dengan memori Onlyx DB dan pembaca dokumen",
+  "description": "Bot Telegram AI dengan memori PostgreSQL dan pembaca dokumen",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
@@ -17,7 +17,8 @@
     "mammoth": "^1.x",
     "node-telegram-bot-api": "^0.66.0",
     "openai": "5.23.2",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.23.1"
   },
   "engines": {
     "node": ">=18"

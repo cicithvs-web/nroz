@@ -20,10 +20,12 @@ const {
 const { buildMessagesWithSystem } = require("./prompt");
 const { executeAICompletionAndReply } = require("./agentLoop");
 const { runQueued } = require("./queuedTurn");
-const { saveMemory, getHistoryForAI, getReplyContext, isChatPaused } = require("../onlyxHelper.js");
+const { saveMemory, getHistoryForAI, getReplyContext, isChatPaused } = require("../dbHelper.js");
 const { ensureWorkspaceStructure, appendRawLog } = require("../workspaceMemoryManager.js");
 const { transcribeAudio } = require("../voiceManager.js");
 const { resolveInWorkspace } = require("../lib/pathGuard");
+const { isOwner } = require("./config");
+const { handleRestore } = require("./dbBackup");
 
 /**
  * Menyimpan file kiriman user ke workspace dari HOST. Sandbox bisa menaruh symlink
@@ -194,6 +196,13 @@ function registerHandlers(bot) {
   // === HANDLER DOKUMEN ===
   bot.on("document", async (msg) => {
     if (msg.from && msg.from.is_bot) return; // [FIX] Mencegah infinite loop bot spam
+
+    // Intersep perintah /restore lewat caption dokumen (khusus owner, menimpa database)
+    if (/^\/restore(?:@\w+)?\s*$/i.test((msg.caption || "").trim())) {
+      if (!isOwner(msg)) return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+      return handleRestore(msg, msg.document);
+    }
+
     if (hasIgnorePrefix(msg.caption)) return;
 
     const access = await checkUserAccess(msg);
@@ -347,7 +356,7 @@ function registerHandlers(bot) {
             `Instruksi AI Agent: File telah disimpan di \`/workspace/uploads/${safeName}\`.`;
         }
 
-        // Catat ke memori Onlyx & raw memory
+        // Catat ke memori percakapan & raw memory
         await saveMemory(
           sessionId,
           "user",
@@ -441,7 +450,7 @@ function registerHandlers(bot) {
         const cleanedText = transcribedText.trim();
         console.log(`[Voice Note Transcribed] [Chat ${chatId}]: "${cleanedText}"`);
 
-        // 5. Catat ke memori Onlyx & raw memory
+        // 5. Catat ke memori percakapan & raw memory
         await saveMemory(sessionId, "user", `[Pesan Suara / Voice Note]: "${cleanedText}"`, msg.message_id);
         appendRawLog(sessionId, "user", `[Pesan Suara / Voice Note]: "${cleanedText}" (uploads/${audioFileName})`, {
           messageId: msg.message_id

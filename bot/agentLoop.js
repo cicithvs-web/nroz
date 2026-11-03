@@ -7,7 +7,7 @@
  */
 
 const { getAllToolDefinitions, executeTool, describeToolCall } = require("../agentTools.js");
-const { saveMemory } = require("../onlyxHelper.js");
+const { saveMemory } = require("../dbHelper.js");
 const { appendRawLog, saveTurnCheckpoint, clearTurnCheckpoint } = require("../workspaceMemoryManager.js");
 const ctx = require("./context");
 const { getClient, getConfig } = require("./config");

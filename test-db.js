@@ -1,15 +1,16 @@
-// Tes cepat koneksi & perilaku Onlyx DB. Jalankan: npm run test-db
+// Tes cepat koneksi & perilaku PostgreSQL (dbHelper). Jalankan: npm run test-db
 // Aman: pakai chat id palsu dan semua data tes dihapus lagi di akhir.
+// Butuh DATABASE_URL di .env yang menunjuk ke database yang boleh diotak-atik.
 require("dotenv").config();
 const {
-  db,
+  query,
+  closeDb,
   saveMemory,
   getHistory,
   getHistoryForAI,
   getReplyContext,
   getChatState,
   updateChatSummary,
-  getMessagesToSummarize,
   newTopic,
   getBotConfig,
   saveBotConfig,
@@ -19,7 +20,7 @@ const {
   deleteUserAccess,
   setChatPaused,
   isChatPaused
-} = require("./onlyxHelper.js");
+} = require("./dbHelper.js");
 
 const chatId = -1009990000000 - Math.floor(Math.random() * 1e6); // mirip id grup Telegram
 const otherChat = chatId - 1;
@@ -31,7 +32,12 @@ function check(name, cond) {
 }
 
 (async () => {
-  console.log("Tes Onlyx DB...\n");
+  if (!process.env.DATABASE_URL) {
+    console.error("❌ DATABASE_URL belum diisi di .env (contoh: postgres://user:pass@localhost:5432/nroz)");
+    process.exit(1);
+  }
+
+  console.log("Tes PostgreSQL...\n");
   try {
     await saveMemory(chatId, "user", "halo", 1001);
     await saveMemory(chatId, "assistant", "hai juga", 1002);
@@ -47,8 +53,10 @@ function check(name, cond) {
     check("getReplyContext nemu pesan yang direply", !!ctx && ctx.content === "hai juga");
     check("getReplyContext null kalau pesan gak ada", (await getReplyContext(chatId, 9999)) === null);
 
-    await saveMemory(chatId, "user", "x".repeat(1_500_000), 1004);
-    check("teks > 1MB dipotong otomatis (gak error)", true);
+    const bigText = "x".repeat(1_500_000);
+    await saveMemory(chatId, "user", bigText, 1004);
+    const bigCtx = await getReplyContext(chatId, 1004);
+    check("teks > 1MB tersimpan utuh (tak ada lagi batas dokumen)", !!bigCtx && bigCtx.content.length === bigText.length);
 
     const { purge } = await newTopic(chatId);
     h = await getHistory(chatId);
@@ -59,11 +67,9 @@ function check(name, cond) {
     h = await getHistory(chatId);
     check("pesan baru muncul di topic baru", h.length === 1 && h[0].content === "topik baru");
 
-    console.log("\nMenunggu pesan lama dibersihkan di background...");
-    await purge;
-    let gone = false;
-    try { await db("GET", `/chat_memory/${chatId}_1001`); } catch (e) { gone = e.status === 404; }
-    check("pesan lama benar-benar terhapus dari database", gone);
+    await purge; // di PostgreSQL penghapusan sudah selesai; ini cuma menjaga bentuk interface
+    const leftover = await query("SELECT id FROM chat_memory WHERE chat_id = $1 AND ts <= $2", [String(chatId), (await getChatState(chatId)).topic_ts]);
+    check("pesan lama benar-benar terhapus dari database", leftover.rowCount === 0);
     check("chat lain tetap aman", (await getHistory(otherChat)).length === 1);
 
     // Tes fitur konfigurasi bot dinamis
@@ -107,18 +113,15 @@ function check(name, cond) {
     check("setChatPaused(false) berhasil", (await isChatPaused(chatId)) === false);
   } catch (err) {
     bad++;
-    console.error("❌ Error:", err.message, err.status ? `(HTTP ${err.status})` : "");
-    console.error("   Cek ONLYX_DB_KEY di .env dan koneksi ke onlyx.top");
+    console.error("❌ Error:", err.message);
+    console.error("   Cek DATABASE_URL di .env dan koneksi ke PostgreSQL");
   } finally {
     // bersihin semua data tes
-    for (const id of [chatId, otherChat]) {
-      try {
-        const res = await db("GET", `/chat_memory?chat_id=eq.${id}&limit=1000`);
-        for (const row of res.data || []) await db("DELETE", `/chat_memory/${encodeURIComponent(row.id)}`);
-      } catch {}
-    }
-    try { await db("DELETE", `/chat_state/${chatId}`); } catch {}
+    try { await query("DELETE FROM chat_memory WHERE chat_id = ANY($1)", [[String(chatId), String(otherChat)]]); } catch {}
+    try { await query("DELETE FROM chat_state WHERE id = ANY($1)", [[String(chatId), String(otherChat)]]); } catch {}
+    try { await deleteUserAccess("9988776655"); } catch {}
     try { await resetBotConfig(); } catch {}
+    await closeDb();
     console.log(`\nHasil: ${ok} lolos, ${bad} gagal`);
     process.exit(bad ? 1 : 0);
   }

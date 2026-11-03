@@ -94,9 +94,12 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── voiceTranscriber.py     # Script Python Faster-Whisper
 ├── schedulerManager.js     # Pengingat (sekali/berulang) & watchdog web
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
-├── onlyxHelper.js          # Helper database memori percakapan Onlyx DB
+├── dbHelper.js             # Helper database memori percakapan PostgreSQL
+├── schema.sql              # Skema tabel (dijalankan otomatis oleh dbHelper)
+├── docker-compose.yml      # PostgreSQL lokal (container nroz-postgres, port hanya localhost)
 ├── videoShareManager.js    # Link unduhan untuk hasil render di atas batas upload bot
 ├── scripts/setup-vps.sh    # Setup sekali jalan untuk server baru (+ mode --check)
+├── scripts/check-db.js     # Probe koneksi DATABASE_URL (dipakai setup-vps.sh)
 ├── .env.example            # Template variabel lingkungan
 └── package.json            # Dependensi Node.js
 ```
@@ -121,14 +124,19 @@ dilewati kalau sudah beres:
 
 ```bash
 git clone https://github.com/cicithvs-web/nroz.git && cd nroz
-cp .env.example .env && nano .env        # isi BOT_TOKEN, API_KEY, BASE_URL, MODEL, ONLYX_DB_*
+cp .env.example .env && nano .env        # isi BOT_TOKEN, API_KEY, BASE_URL, MODEL, OWNER_ID
 sudo bash scripts/setup-vps.sh
 ```
 
 Script memasang Node.js >= 18, Docker, ffmpeg/ffprobe, yt-dlp, library yang dibutuhkan
 Chrome Headless Shell, `cloudflared` (web preview + link unduhan video), swapfile untuk
 render video panjang, dependensi npm bot + Remotion, venv `edge-tts`, image sandbox
-Docker, lalu menjalankan bot di pm2 dan mengaktifkan auto-start saat reboot.
+Docker, menjalankan PostgreSQL lokal (container `nroz-postgres`, password acak ditulis
+otomatis ke `.env` sebagai `DATABASE_URL`, data persist di volume `nroz-pg-data`),
+lalu menjalankan bot di pm2 dan mengaktifkan auto-start saat reboot.
+
+Mau pakai database PostgreSQL eksternal (managed DB) instead? Isi `DATABASE_URL`
+sendiri di `.env` sebelum menjalankan script — container lokal tidak akan dijalankan.
 
 Cek kondisi server tanpa mengubah apa pun:
 

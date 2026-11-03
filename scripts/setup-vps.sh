@@ -91,6 +91,8 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   check "cloudflared (web preview & link unduhan)" "command -v cloudflared" "bash scripts/setup-vps.sh"
   check "python3 + venv" "python3 -m venv --help"
   check ".env terisi BOT_TOKEN" "grep -qE '^BOT_TOKEN=[A-Za-z0-9]' .env" "cp .env.example .env lalu isi"
+  check ".env terisi DATABASE_URL" "grep -qE '^DATABASE_URL=postgres://' .env && ! grep -q '^DATABASE_URL=postgres://user:password' .env" "dibuat otomatis oleh setup-vps.sh"
+  check "PostgreSQL merespons" "node scripts/check-db.js" "bash scripts/setup-vps.sh"
   check "node_modules bot" "[ -d node_modules ]" "npm install"
   check "node_modules remotion-engine" "[ -d remotion-engine/node_modules ]" "cd remotion-engine && npm install"
   check "Chrome Headless Shell (Remotion)" "[ -d remotion-engine/node_modules/.remotion/chrome-headless-shell ]" "cd remotion-engine && npx remotion browser ensure"
@@ -157,6 +159,11 @@ if [ "$INSTALL_DOCKER" -eq 1 ]; then
     apt-get install -y -qq docker.io
     systemctl enable --now docker
   fi
+  # Plugin compose dipakai untuk PostgreSQL; tidak selalu ada di paket docker.io distro.
+  if ! docker compose version >/dev/null 2>&1; then
+    apt_ensure_update
+    apt-get install -y -qq docker-compose-v2 >/dev/null 2>&1 || true
+  fi
 fi
 
 # ---------------------------------------------------------------- cloudflared
@@ -201,7 +208,7 @@ else
   say "Membuat .env dari .env.example"
   cp .env.example .env
   chmod 600 .env
-  warn ".env masih berisi contoh. Isi BOT_TOKEN, API_KEY, BASE_URL, MODEL, ONLYX_DB_URL, ONLYX_DB_KEY, OWNER_ID."
+  warn ".env masih berisi contoh. Isi BOT_TOKEN, API_KEY, BASE_URL, MODEL, OWNER_ID. DATABASE_URL diisi otomatis oleh script ini."
 fi
 
 # ---------------------------------------------------------------- node deps
@@ -210,6 +217,61 @@ if [ "$INSTALL_NPM" -eq 1 ]; then
   npm install --no-fund --no-audit
   say "npm install (remotion-engine) + unduh Chrome Headless Shell"
   (cd remotion-engine && npm install --no-fund --no-audit && npx remotion browser ensure)
+fi
+
+# ---------------------------------------------------------------- postgres
+# Memori & konfigurasi bot disimpan di PostgreSQL lokal (container nroz-postgres).
+# Password dibuat acak sekali dan disimpan di .env; data bertahan di volume
+# nroz-pg-data dan container hidup otomatis saat reboot (--restart unless-stopped).
+if grep -qE '^DATABASE_URL=' .env && ! grep -q '^DATABASE_URL=postgres://user:password@' .env; then
+  say "DATABASE_URL sudah diisi di .env, lewati pembuatan kredensial"
+else
+  say "Membuat kredensial PostgreSQL acak dan menuliskannya ke .env"
+  PG_PASS="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  PG_URL="postgres://nroz:${PG_PASS}@localhost:5432/nroz"
+  grep -qE '^POSTGRES_DB=' .env || echo 'POSTGRES_DB=nroz' >> .env
+  grep -qE '^POSTGRES_USER=' .env || echo 'POSTGRES_USER=nroz' >> .env
+  grep -qE '^POSTGRES_PASSWORD=' .env || echo "POSTGRES_PASSWORD=${PG_PASS}" >> .env
+  if grep -qE '^DATABASE_URL=' .env; then
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${PG_URL}|" .env
+  else
+    echo "DATABASE_URL=${PG_URL}" >> .env
+  fi
+fi
+
+if ! grep -qE '^DATABASE_URL=.*@(localhost|127\.0\.0\.1)' .env; then
+  say "DATABASE_URL menunjuk ke server lain — container PostgreSQL lokal tidak dijalankan"
+elif docker ps --format '{{.Names}}' | grep -qx nroz-postgres; then
+  say "Container PostgreSQL sudah jalan, lewati"
+else
+  say "Menjalankan PostgreSQL (container nroz-postgres, volume nroz-pg-data)"
+  if docker compose version >/dev/null 2>&1; then
+    docker compose up -d postgres
+  else
+    # Fallback tanpa plugin compose: definisi yang sama seperti docker-compose.yml.
+    docker pull postgres:16-alpine
+    docker rm -f nroz-postgres >/dev/null 2>&1 || true
+    PG_PASS="$(grep -E '^POSTGRES_PASSWORD=' .env | head -1 | cut -d= -f2-)"
+    docker create --name nroz-postgres --restart unless-stopped \
+      -e POSTGRES_DB=nroz -e POSTGRES_USER=nroz -e "POSTGRES_PASSWORD=${PG_PASS}" \
+      -v nroz-pg-data:/var/lib/postgresql/data -p 127.0.0.1:5432:5432 \
+      postgres:16-alpine >/dev/null
+    docker start nroz-postgres >/dev/null
+  fi
+fi
+
+if grep -qE '^DATABASE_URL=.*@(localhost|127\.0\.0\.1)' .env; then
+  say "Memastikan PostgreSQL merespons"
+  pg_ready=0
+  for _ in $(seq 1 30); do
+    if node scripts/check-db.js >/dev/null 2>&1; then pg_ready=1; break; fi
+    sleep 1
+  done
+  if [ "$pg_ready" -eq 1 ]; then
+    ok "PostgreSQL siap dipakai bot"
+  else
+    warn "PostgreSQL belum merespons — cek: docker logs nroz-postgres"
+  fi
 fi
 
 # ---------------------------------------------------------------- voice env

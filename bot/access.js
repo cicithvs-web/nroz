@@ -5,7 +5,7 @@
 const ctx = require("./context");
 const { OWNER_ID } = require("./config");
 const { replyText } = require("./send");
-const { getUserAccess, setUserAccess } = require("../onlyxHelper.js");
+const { getUserAccess, setUserAccess } = require("../dbHelper.js");
 
 // Session ID unik: jika di supergroup topic, pisahkan per topic thread
 function getSessionId(msg) {
