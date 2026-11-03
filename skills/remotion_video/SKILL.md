@@ -34,9 +34,11 @@ Skill ini digunakan setiap kali user meminta membuat, merancang, atau merender v
   Gunakan ini untuk menganimasikan teks kata-per-kata sesuai waktu pengucapan.
 
 ## Aturan Durasi & FPS (Optimasi Server)
-- Video pendek (≤ 60 detik): Gunakan `fps: 30` (default).
-- Video panjang (> 2 menit): **WAJIB kirim parameter `fps: 15`** untuk menghemat waktu rendering hingga 50%.
-- Kecepatan render server rata-rata ±0,35 detik per frame. Video 5 menit @15fps (4.500 frame) memakan waktu ±26 menit. Informasikan estimasi waktu ini ke user.
+- Default: `fps: 30` untuk semua durasi.
+- `fps: 15`: hanya untuk video panjang (> 2 menit) DAN hanya jika user meminta cepat/hemat, atau setelah user setuju saat kamu tawari pilihan itu. Jangan menurunkan fps diam-diam.
+- `fps: 60`: selalu boleh — WAJIB dipatuhi jika user meminta gerakan lebih halus ("smooth", "frame lebih banyak", "60fps"), meskipun menambah waktu render. Permintaan eksplisit user soal fps selalu menang atas aturan optimasi.
+- Rentang fps yang diterima server: 15–60.
+- Kecepatan render server rata-rata ±0,35 detik per frame. Contoh video 5 menit: @15fps (4.500 frame) ≈ 26 menit, @30fps (9.000 frame) ≈ 53 menit, @60fps (18.000 frame) ≈ 105 menit. Selalu informasikan estimasi waktu ini ke user, terutama sebelum render 60fps.
 
 ## Musik Latar & Audio Fisik
 - Jika user meminta musik latar atau menyertakan file audio di workspace, isi parameter `audio_path` (contoh: `/workspace/musik.mp3`).
