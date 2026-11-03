@@ -23,6 +23,26 @@
       ],
       "toolPrefix": "",
       "env": {}
+    },
+    "context7": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ],
+      "toolPrefix": "",
+      "env": {}
+    },
+    "tavily": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "tavily-mcp"
+      ],
+      "toolPrefix": "",
+      "env": {}
     }
   }
 }
