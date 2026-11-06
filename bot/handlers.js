@@ -26,6 +26,7 @@ const { transcribeAudio } = require("../voiceManager.js");
 const { resolveInWorkspace } = require("../lib/pathGuard");
 const { isOwner } = require("./config");
 const { handleRestore } = require("./dbBackup");
+const { takePendingAskAnswer } = require("../tools/ask");
 const { ingestFileBuffer, ingestChatMessage } = require("./knowledge");
 
 /**
@@ -56,6 +57,11 @@ function registerHandlers(bot) {
     }
 
     const sessionId = getSessionId(msg);
+
+    // Jawaban teks untuk ask_user yang sedang menunggu — dipakai langsung, tanpa giliran AI.
+    if (takePendingAskAnswer(sessionId, msg.text)) {
+      return;
+    }
 
     // Jika topik / chat sedang di-pause, bot diam
     if (await isChatPaused(sessionId)) {

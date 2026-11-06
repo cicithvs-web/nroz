@@ -8,6 +8,7 @@ const { getUserAccess, setUserAccess } = require("../dbHelper.js");
 const { getTask, removeTask } = require("../schedulerManager.js");
 const { buildTasksMessage } = require("./commands");
 const { getSessionId } = require("./access");
+const { handleAskCallback } = require("../tools/ask");
 
 /** Sesi tempat tombol ditekan; aturan sama dengan getSessionId untuk pesan biasa. */
 function sessionIdFromQuery(query) {
@@ -129,6 +130,7 @@ function registerCallbacks(bot) {
     if (!query.data) return;
     try {
       if (query.data.startsWith("task_cancel:")) return await handleTaskCancel(query);
+      if (query.data.startsWith("ask:")) return await handleAskCallback(query);
       if (query.data.startsWith("acc_app_") || query.data.startsWith("acc_rej_")) return await handleAccessCallback(query);
       await bot.answerCallbackQuery(query.id);
     } catch (err) {

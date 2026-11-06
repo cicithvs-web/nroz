@@ -84,6 +84,11 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
       diatur lewat `EMBED_MODEL` / `EMBED_DIM` di `.env`; matikan indeks percakapan otomatis dengan
       `KNOWLEDGE_INGEST_CHAT=off`.
 
+11. **❓ Agent Bisa Bertanya (`ask_user`)**:
+    - Saat requirement ambigu atau sebelum tindakan berisiko, agent mengirim pertanyaan dengan tombol
+      pilihan dan MENUNGGU jawaban (default 10 menit, maks 60) sebelum melanjutkan. Jawaban bisa lewat
+      tombol atau ketik langsung; kalau tidak dijawab sampai timeout, agent lanjut dengan asumsi terbaik.
+
 ---
 
 ## 📁 Struktur Proyek

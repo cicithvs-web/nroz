@@ -73,6 +73,8 @@ function describeToolCall(name, args = {}) {
     }
     case "search_knowledge":
       return `mencari semantik "${oneLine(args.query, 50)}"${args.source ? ` di ${oneLine(args.source, 20)}` : ""}`;
+    case "ask_user":
+      return `bertanya ke user: "${oneLine(args.question, 60)}"${Array.isArray(args.options) && args.options.length ? ` (${args.options.length} opsi)` : ""}`;
     case "media_download":
       return `mengunduh media dari ${oneLine(args.url, 70)}`;
     case "render_remotion_video": {

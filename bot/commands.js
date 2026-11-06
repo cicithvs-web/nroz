@@ -28,6 +28,7 @@ const { handleBackup, handleBackupFull, handleRestore } = require("./dbBackup");
 const { listTasks, removeTask, formatInZone, REPEAT_LABEL } = require("../schedulerManager.js");
 const skillsManager = require("../skillsManager.js");
 const webhookManager = require("../webhookManager.js");
+const { cancelPendingAsks } = require("../tools/ask");
 
 /** URL tunnel webhook yang sedang aktif (diset /webhookurl). */
 let tunnelUrlCache = null;
@@ -362,6 +363,7 @@ function registerCommands(bot) {
 
     const sessionId = getSessionId(msg);
     const dropped = turnQueue.cancelPending(sessionId);
+    const askedDropped = cancelPendingAsks(sessionId, "dihentikan lewat /stop");
     if (activeTurnSessions.has(sessionId)) {
       activeTurnSessions.get(sessionId).cancelled = true;
       await replyText(

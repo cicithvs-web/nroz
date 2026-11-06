@@ -822,6 +822,41 @@ const TOOL_DEFINITIONS = [
     },
   },
 
+  // --- y) ask_user ---
+  {
+    type: "function",
+    function: {
+      name: "ask_user",
+      description:
+        "BERTANYA KE USER di tengah tugas, dengan tombol pilihan. Tugas akan MENUNGGU jawaban user (maksimal " +
+        "sesuai 'timeout_minutes', default 10 menit) lalu melanjutkan berdasarkan jawabannya. WAJIB digunakan saat: " +
+        "(1) requirement ambigu dan menebak bisa salah mahal (pilih framework, arsitektur, gaya desain), " +
+        "(2) sebelum tindakan berisiko atau sulit dibatalkan (deploy, hapus data, kirim pesan ke pihak lain), " +
+        "(3) user meminta dikonfirmasi dulu. Berikan 2-4 opsi ringkas bila pertanyaannya pilihan; kosongkan 'options' " +
+        "bila jawabannya bebas. Kalau timeout, lanjutkan dengan asumsi terbaik dan sebutkan asumsinya.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "Pertanyaan yang jelas dan spesifik (misal: 'Deploy ke staging atau langsung production?').",
+          },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Pilihan jawaban berupa tombol (2-8 opsi, tiap opsi maks 64 karakter, misal ['staging', 'production', 'batalkan']). " +
+              "Kosongkan bila user bebas menjawab dengan teks.",
+          },
+          timeout_minutes: {
+            type: "number",
+            description: "Batas menunggu jawaban dalam menit (default 10, maks 60). Setelah itu lanjut dengan asumsi.",
+          },
+        },
+        required: ["question"],
+      },
+    },
+  },
 ];
 
 module.exports = { TOOL_DEFINITIONS };

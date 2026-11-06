@@ -11,6 +11,7 @@
  *   tools/memory.js       record_decision, forget_decision, update_project_context, search_raw_memory
  *   tools/skills.js       read_skill, save_skill
  *   tools/knowledge.js    search_knowledge (RAG semantik, bot/knowledge.js)
+ *   tools/ask.js          ask_user (bertanya ke user dengan tombol, menunggu jawaban)
  *   tools/system.js       system_info
  *   tools/describe.js     ringkasan satu baris tiap tool call untuk draft progres
  *
@@ -33,6 +34,7 @@ const memory = require("./tools/memory");
 const skills = require("./tools/skills");
 const system = require("./tools/system");
 const knowledge = require("./tools/knowledge");
+const ask = require("./tools/ask");
 
 /**
  * Tool: delegate_task
@@ -85,6 +87,7 @@ const TOOL_HANDLERS = {
   create_watchdog: scheduling.toolCreateWatchdog,
   schedule_agent_task: scheduling.toolScheduleAgentTask,
   search_knowledge: knowledge.toolSearchKnowledge,
+  ask_user: ask.toolAskUser,
   media_download: media.toolMediaDownload,
   render_remotion_video: media.toolRenderRemotionVideo,
   record_decision: memory.toolRecordDecision,
