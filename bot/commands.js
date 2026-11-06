@@ -27,7 +27,10 @@ const { resetSandbox, getSandboxInfo } = require("../sandboxManager.js");
 const { handleBackup, handleBackupFull, handleRestore } = require("./dbBackup");
 const { listTasks, removeTask, formatInZone, REPEAT_LABEL } = require("../schedulerManager.js");
 const skillsManager = require("../skillsManager.js");
+const webhookManager = require("../webhookManager.js");
 
+/** URL tunnel webhook yang sedang aktif (diset /webhookurl). */
+let tunnelUrlCache = null;
 
 /**
  * Menu perintah yang tampil saat user mengetik "/" di Telegram (setMyCommands).
@@ -61,7 +64,11 @@ const OWNER_COMMANDS = [
   { command: "cleanall", description: "👑 Bersihkan workspace lama semua user" },
   { command: "backup", description: "👑 Backup database (kirim file .sql)" },
   { command: "backupfull", description: "👑 Backup penuh: database + workspace (.tar.gz)" },
-  { command: "restore", description: "👑 Restore database dari file .sql" }
+  { command: "restore", description: "👑 Restore database dari file .sql" },
+  { command: "hooks", description: "👑 Daftar webhook masuk" },
+  { command: "addhook", description: "👑 Buat webhook baru: /addhook nama [notify|agent]" },
+  { command: "delhook", description: "👑 Hapus webhook: /delhook nama" },
+  { command: "webhookurl", description: "👑 Buka URL publik untuk webhook" }
 ];
 
 /** Pasang menu perintah: umum untuk semua chat, versi lengkap untuk chat pribadi owner. */
@@ -762,6 +769,109 @@ Kembalikan ke pengaturan awal dari .env`;
     );
   });
 
+  // --- PERINTAH OWNER: BUAT WEBHOOK BARU ---
+  bot.onText(/^\/addhook(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+
+    const argStr = (match[1] || "").trim();
+    const parts = argStr.split(/\s+/).filter(Boolean);
+    if (parts.length === 0) {
+      return replyText(
+        msg,
+        "Format salah. Contoh:\n`/addhook github agent`\n`/addhook form_klien notify`\n\n" +
+          "• mode `notify`: payload diteruskan ke chat sebagai pesan\n" +
+          "• mode `agent`: payload membangunkan AI Agent untuk ditindaklanjuti"
+      );
+    }
+    const [name, modeRaw] = parts;
+    const mode = (modeRaw || "notify").toLowerCase();
+
+    try {
+      const hook = webhookManager.addHook({
+        name,
+        mode,
+        sessionId: getSessionId(msg),
+        chatId: msg.chat.id,
+        threadId: msg.message_thread_id || null
+      });
+      const tunnelHint = tunnelUrlCache
+        ? `\n\n🔗 URL webhook:\n\`${webhookManager.hookUrlByName(hook.name, tunnelUrlCache)}\``
+        : `\n\nℹ️ URL publik belum dibuka. Jalankan /webhookurl untuk mendapatkan link-nya.`;
+      await replyText(
+        msg,
+        `🔗 *Webhook \`${hook.name}\` dibuat* (mode: ${hook.mode})\n\n` +
+          `Kirim event: \`POST /h/<token>\` (token acak 32-hex, body JSON/teks maks 64 KB).${tunnelHint}`
+      );
+    } catch (err) {
+      await replyText(msg, `❌ Gagal membuat webhook: ${err.message}`);
+    }
+  });
+
+  // --- PERINTAH OWNER: DAFTAR WEBHOOK ---
+  bot.onText(/^\/hooks(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+
+    const hooks = webhookManager.listHooks();
+    if (hooks.length === 0) {
+      return replyText(msg, "ℹ️ Belum ada webhook. Buat dengan `/addhook <nama> [notify|agent]`.");
+    }
+    const lines = hooks.map((h, i) => {
+      const last = h.lastFiredAt ? formatInZone(h.lastFiredAt) : "belum pernah";
+      return `${i + 1}. \`${h.name}\` (mode ${h.mode}) → chat ${h.chatId}${h.threadId ? ` topic ${h.threadId}` : ""}\n` +
+        `    ${h.fireCount} event · terakhir: ${last}`;
+    });
+    await replyText(msg, `🔗 *Webhook Aktif (${hooks.length}):*\n\n${lines.join("\n")}\n\n_Hapus dengan /delhook <nama>, buka URL publik dengan /webhookurl._`);
+  });
+
+  // --- PERINTAH OWNER: HAPUS WEBHOOK ---
+  bot.onText(/^\/delhook(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+    const name = (match[1] || "").trim();
+    if (!name) {
+      return replyText(msg, "Format: `/delhook <nama>`\nLihat daftar dengan /hooks");
+    }
+    const removed = webhookManager.removeHook(name);
+    await replyText(msg, removed ? `✅ Webhook \`${name}\` dihapus.` : `❌ Webhook \`${name}\` tidak ditemukan.`);
+  });
+
+  // --- PERINTAH OWNER: BUKA URL PUBLIK WEBHOOK (CLOUDFLARE TUNNEL) ---
+  bot.onText(/^\/webhookurl(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+
+    const hooks = webhookManager.listHooks();
+    if (hooks.length === 0) {
+      return replyText(msg, "ℹ️ Belum ada webhook. Buat dulu dengan `/addhook <nama> [notify|agent]`.");
+    }
+
+    await replyText(msg, "⏳ Membuka Cloudflare Tunnel untuk webhook (±30 detik)...");
+    try {
+      const url = await webhookManager.ensureTunnel();
+      tunnelUrlCache = url;
+      const lines = webhookManager
+        .listHooks()
+        .map((h) => `• \`${h.name}\` (${h.mode}):\n\`${webhookManager.hookUrlByName(h.name, url)}\``);
+      await replyText(
+        msg,
+        `🌐 *URL Publik Webhook Aktif:*\n\n${lines.join("\n")}\n\n` +
+          `_Catatan: quick tunnel mendapat hostname acak — jalankan ulang /webhookurl setiap kali bot direstart. ` +
+          `Untuk URL permanen, arahkan reverse proxy/named tunnel milikmu ke 127.0.0.1:${webhookManager.WEBHOOK_PORT}._`
+      );
+    } catch (err) {
+      await replyText(msg, `❌ Gagal membuka tunnel: ${err.message}`);
+    }
+  });
 }
 
 module.exports = { registerCommands, registerBotCommands, buildTasksMessage, PUBLIC_COMMANDS, OWNER_COMMANDS };

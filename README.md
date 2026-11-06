@@ -69,6 +69,13 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
      (harian/hari kerja/mingguan/bulanan), tampil di `/tasks` dengan tombol batal.
    - Contoh: "tiap pagi jam 7 cek harga emas, bandingkan dengan catatan kemarin, lapor kalau berubah >2%".
 
+9. **🔗 Webhook Masuk (`/addhook`, `/hooks`, `/webhookurl`)**:
+   - Terima event dari layanan eksternal (GitHub, Stripe, n8n, IFTTT, form, dsb): `POST /h/<token>` dengan
+     body JSON/teks (maks 64 KB). Server hook hanya menempel di `127.0.0.1`; URL publik dibuka lewat
+     Cloudflare Quick Tunnel lewat perintah owner `/webhookurl`.
+   - Mode `notify`: payload diteruskan ke chat. Mode `agent`: payload membangunkan AI Agent untuk
+     ditindaklanjuti otomatis. Token hook acak 32-hex; data hook tersimpan di `webhook_data.json`.
+
 ---
 
 ## 📁 Struktur Proyek
@@ -99,6 +106,7 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── voiceManager.js         # Transkripsi suara Whisper wrapper
 ├── voiceTranscriber.py     # Script Python Faster-Whisper
 ├── schedulerManager.js     # Pengingat, watchdog web, & tugas agent terjadwal
+├── webhookManager.js       # Webhook masuk: event eksternal -> notif chat / agent
 ├── bot/agentTrigger.js     # Membangunkan agent loop (tugas terjadwal & webhook)
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
 ├── dbHelper.js             # Helper database memori percakapan PostgreSQL

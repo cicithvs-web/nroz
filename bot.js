@@ -21,6 +21,7 @@ const TelegramBot = require("node-telegram-bot-api");
 const ctx = require("./bot/context");
 const { syncConfigFromDb } = require("./bot/config");
 const { initScheduler } = require("./schedulerManager.js");
+const { initWebhooks } = require("./webhookManager.js");
 const { initMCP, closeAllMcp } = require("./mcpManager.js");
 const { startAutoCleanup } = require("./bot/workspace");
 const { registerRenderDelivery } = require("./bot/renderDelivery");
@@ -52,6 +53,7 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 ctx.bot = bot;
 
 initScheduler(bot);
+initWebhooks(bot);
 
 initMCP()
   .then((res) => {

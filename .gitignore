@@ -6,6 +6,7 @@ remotion-engine/node_modules/
 .env
 config.json
 scheduler_data.json
+webhook_data.json
 
 # Workspace and temporary runtime data
 workspace/
