@@ -744,6 +744,52 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // --- w) schedule_agent_task ---
+  {
+    type: "function",
+    function: {
+      name: "schedule_agent_task",
+      description:
+        "Menjadwalkan TUGAS OTONOM (bukan sekadar pengingat). Saat waktunya tiba, KAMU akan dibangunkan otomatis " +
+        "dengan instruksi 'task' ini di chat yang sama, lengkap dengan akses semua tools, lalu bekerja sampai tuntas " +
+        "dan melaporkan hasilnya ke user. Gunakan untuk pekerjaan mandiri berkala seperti: digest pagi otomatis, " +
+        "cek harga/berita/kompetitor tiap hari, backup mingguan, atau follow-up pekerjaan yang belum selesai. " +
+        "BEDAKAN dari create_reminder (hanya mengirim teks pengingat) dan create_watchdog (hanya memantau status URL). " +
+        "Isi 'task' sebagai instruksi lengkap yang bisa dipahami kamu di masa depan tanpa konteks tambahan.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description:
+              "Instruksi tugas lengkap yang akan kamu eksekusi saat terpicu (misal: 'Cek harga emas hari ini di web, " +
+              "bandingkan dengan catatan kemarin di work/harga.md, lalu laporkan perubahannya').",
+          },
+          minutes_from_now: {
+            type: "number",
+            description: "Berapa menit lagi dari sekarang (misal 60, 1440 untuk 1 hari). Kosongkan kalau memakai 'at'.",
+          },
+          at: {
+            type: "string",
+            description:
+              "Waktu absolut menurut zona 'timezone': 'YYYY-MM-DD HH:mm' atau cukup 'HH:mm' (kejadian berikutnya dari jam itu).",
+          },
+          repeat: {
+            type: "string",
+            enum: ["none", "daily", "weekdays", "weekly", "monthly"],
+            description: "Pengulangan: none (sekali, default), daily, weekdays (Senin-Jumat), weekly, monthly.",
+          },
+          timezone: {
+            type: "string",
+            description: "Zona waktu IANA, default 'Asia/Jakarta' (WIB).",
+          },
+        },
+        required: ["task"],
+      },
+    },
+  },
+
 ];
 
 module.exports = { TOOL_DEFINITIONS };

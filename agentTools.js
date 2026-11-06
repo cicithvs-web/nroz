@@ -7,7 +7,7 @@
  *   tools/web.js          web_search, read_url, http_request
  *   tools/files.js        file_read/write/edit/list, send_photo, send_file
  *   tools/media.js        media_download, render_remotion_video, start_web_preview
- *   tools/scheduling.js   create_reminder, create_watchdog
+ *   tools/scheduling.js   create_reminder, create_watchdog, schedule_agent_task
  *   tools/memory.js       record_decision, forget_decision, update_project_context, search_raw_memory
  *   tools/skills.js       read_skill, save_skill
  *   tools/system.js       system_info
@@ -81,6 +81,7 @@ const TOOL_HANDLERS = {
   start_web_preview: media.toolStartWebPreview,
   create_reminder: scheduling.toolCreateReminder,
   create_watchdog: scheduling.toolCreateWatchdog,
+  schedule_agent_task: scheduling.toolScheduleAgentTask,
   media_download: media.toolMediaDownload,
   render_remotion_video: media.toolRenderRemotionVideo,
   record_decision: memory.toolRecordDecision,

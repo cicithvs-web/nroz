@@ -64,6 +64,13 @@ function describeToolCall(name, args = {}) {
     }
     case "create_watchdog":
       return `memantau ${oneLine(args.url, 60)}`;
+    case "schedule_agent_task": {
+      const kapan = args.at
+        ? `pada ${oneLine(args.at, 20)}`
+        : `${oneLine(args.minutes_from_now, 6)} menit lagi`;
+      const ulang = args.repeat && args.repeat !== "none" ? ` (${oneLine(args.repeat, 10)})` : "";
+      return `menjadwalkan tugas otonom ${kapan}${ulang}: ${oneLine(args.task, 50)}`;
+    }
     case "media_download":
       return `mengunduh media dari ${oneLine(args.url, 70)}`;
     case "render_remotion_video": {

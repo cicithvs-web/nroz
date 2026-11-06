@@ -28,6 +28,7 @@ const { handleBackup, handleBackupFull, handleRestore } = require("./dbBackup");
 const { listTasks, removeTask, formatInZone, REPEAT_LABEL } = require("../schedulerManager.js");
 const skillsManager = require("../skillsManager.js");
 
+
 /**
  * Menu perintah yang tampil saat user mengetik "/" di Telegram (setMyCommands).
  * Deskripsi maksimal 256 karakter; perintah hanya huruf kecil, angka, dan garis bawah.
@@ -78,13 +79,14 @@ async function registerBotCommands(bot) {
 
 /** Isi pesan /tasks plus tombol batal per tugas. */
 function buildTasksMessage(sessionId) {
-  const { reminders: rList, watchdogs: wList } = listTasks(sessionId);
-  if (rList.length === 0 && wList.length === 0) {
+  const { reminders: rList, watchdogs: wList, agentTasks: aList } = listTasks(sessionId);
+  if (rList.length === 0 && wList.length === 0 && aList.length === 0) {
     return {
       text:
-        "⏰ *Tidak ada pengingat atau pemantau aktif.*\n\n" +
-        "Kamu bisa meminta AI Agent membuat pengingat (misal: _ingatkan saya 15 menit lagi untuk meeting_, " +
-        "_ingatkan tiap hari kerja jam 09:00 untuk standup_) atau pemantau web (misal: _pantau https://example.com tiap 10 menit_).",
+        "⏰ *Tidak ada pengingat, pemantau, atau tugas terjadwal aktif.*\n\n" +
+        "Kamu bisa meminta AI Agent membuat pengingat (misal: _ingatkan saya 15 menit lagi untuk meeting_), " +
+        "pemantau web (misal: _pantau https://example.com tiap 10 menit_), atau tugas otonom terjadwal " +
+        "(misal: _tiap pagi jam 7 cek harga emas dan laporkan perubahannya_).",
       keyboard: []
     };
   }
@@ -101,6 +103,18 @@ function buildTasksMessage(sessionId) {
       text += `${i + 1}. "${noMd(clip(r.message, 80))}"\n    ${formatInZone(r.targetTime, r.timezone)}${repeat}\n`;
       keyboard.push([
         { text: `❌ Batalkan pengingat ${i + 1}: ${clip(r.message, 24)}`, callback_data: `task_cancel:${r.id}` }
+      ]);
+    });
+    text += "\n";
+  }
+
+  if (aList.length > 0) {
+    text += "*🤖 Tugas Agent Terjadwal (dikerjakan otomatis):*\n";
+    aList.forEach((t, i) => {
+      const repeat = t.repeat && t.repeat !== "none" ? ` · 🔁 ${REPEAT_LABEL[t.repeat]}` : "";
+      text += `${i + 1}. "${noMd(clip(t.task, 80))}"\n    eksekusi: ${formatInZone(t.targetTime, t.timezone)}${repeat}\n`;
+      keyboard.push([
+        { text: `❌ Batalkan tugas ${i + 1}: ${clip(t.task, 24)}`, callback_data: `task_cancel:${t.id}` }
       ]);
     });
     text += "\n";
@@ -747,6 +761,7 @@ Kembalikan ke pengaturan awal dari .env`;
       `🔄 *Pengaturan telah direset ke default .env!*\n\n• Model: \`${currentConfig.model}\`\n• Base URL: \`${currentConfig.baseUrl}\`\n• API Key: \`${maskKey(currentConfig.apiKey)}\``
     );
   });
+
 }
 
 module.exports = { registerCommands, registerBotCommands, buildTasksMessage, PUBLIC_COMMANDS, OWNER_COMMANDS };

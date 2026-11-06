@@ -1,5 +1,5 @@
 /**
- * tools/scheduling.js — Tool penjadwalan: create_reminder, create_watchdog.
+ * tools/scheduling.js — Tool penjadwalan: create_reminder, create_watchdog, schedule_agent_task.
  */
 
 const scheduler = require("../schedulerManager.js");
@@ -76,4 +76,59 @@ async function toolCreateWatchdog({ url, interval_minutes, sessionId, chatId, th
   return `🚨 Watchdog pemantau server aktif untuk: ${url}\n• Interval pengecekan: Setiap ${interval} menit.\nBot akan otomatis mengirimkan peringatan di Telegram jika website down/error.`;
 }
 
-module.exports = { toolCreateReminder, toolCreateWatchdog };
+/**
+ * Tool: schedule_agent_task
+ * Berbeda dari create_reminder (yang hanya mengirim teks): saat waktunya tiba, agent
+ * dibangunkan dengan instruksi ini dan bekerja otonom memakai semua tools, lalu melapor
+ * ke chat. Dipakai untuk pekerjaan berkala/mandiri, bukan sekadar pengingat.
+ */
+async function toolScheduleAgentTask({ task, minutes_from_now, at, repeat, timezone, sessionId, chatId, threadId }) {
+  if (!task || !String(task).trim()) return "❌ Parameter 'task' (instruksi tugas) wajib diisi.";
+  const tz = timezone || scheduler.DEFAULT_TZ;
+  const rep = repeat || "none";
+  if (!scheduler.REPEATS.includes(rep)) {
+    return `❌ 'repeat' harus salah satu dari: ${scheduler.REPEATS.join(", ")}.`;
+  }
+
+  let targetTime;
+  try {
+    if (at) {
+      targetTime = scheduler.parseAt(at, tz);
+    } else if (minutes_from_now !== undefined && minutes_from_now !== null && minutes_from_now !== "") {
+      const mins = Number(minutes_from_now);
+      if (Number.isNaN(mins) || mins <= 0) return "❌ 'minutes_from_now' harus berupa angka positif.";
+      targetTime = Date.now() + mins * 60_000;
+    } else {
+      return "❌ Isi salah satu: 'minutes_from_now' atau 'at'.";
+    }
+    if (targetTime <= Date.now()) {
+      return `❌ Waktu ${scheduler.formatInZone(targetTime, tz)} sudah lewat. Pilih waktu yang akan datang.`;
+    }
+
+    const t = scheduler.addAgentTask({
+      sessionId: sessionId || "default",
+      chatId: chatId ?? scheduler.splitSessionId(sessionId || "default").chatId,
+      threadId: threadId ?? null,
+      task,
+      targetTime,
+      repeat: rep,
+      timezone: tz
+    });
+
+    const taskPreview = String(task).trim();
+    return (
+      `🤖 Tugas agent terjadwal berhasil didaftarkan!\n` +
+      `• ID: ${t.id}\n` +
+      `• Tugas: "${taskPreview.slice(0, 150)}${taskPreview.length > 150 ? "…" : ""}"\n` +
+      `• Eksekusi pertama: ${scheduler.formatInZone(t.targetTime, tz)}\n` +
+      `• Pengulangan: ${scheduler.REPEAT_LABEL[rep]}\n` +
+      `Saat waktunya tiba, kamu akan dibangunkan otomatis dengan instruksi ini untuk dikerjakan ` +
+      `sampai tuntas dengan semua tools yang tersedia, dan hasilnya dilaporkan ke chat ini. ` +
+      `User bisa melihat/membatalkannya lewat /tasks.`
+    );
+  } catch (err) {
+    return `❌ Gagal menjadwalkan tugas agent: ${err.message}`;
+  }
+}
+
+module.exports = { toolCreateReminder, toolCreateWatchdog, toolScheduleAgentTask };

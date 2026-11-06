@@ -63,6 +63,12 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 7. **🎬 Media Downloader & Converter**:
    - Unduh video/audio dari YouTube, TikTok, Instagram, Twitter/X, SoundCloud menggunakan `yt-dlp` dan `ffmpeg`.
 
+8. **🤖 Tugas Agent Terjadwal (`schedule_agent_task`)**:
+   - Beda dari pengingat biasa: saat waktunya tiba, AI Agent dibangunkan otomatis dengan instruksi tugasnya
+     dan bekerja mandiri memakai semua tools, lalu melaporkan hasilnya ke chat. Sekali jalan atau berulang
+     (harian/hari kerja/mingguan/bulanan), tampil di `/tasks` dengan tombol batal.
+   - Contoh: "tiap pagi jam 7 cek harga emas, bandingkan dengan catatan kemarin, lapor kalau berubah >2%".
+
 ---
 
 ## 📁 Struktur Proyek
@@ -92,7 +98,8 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── ttsManager.js           # Text-to-Speech (Edge Neural Voices)
 ├── voiceManager.js         # Transkripsi suara Whisper wrapper
 ├── voiceTranscriber.py     # Script Python Faster-Whisper
-├── schedulerManager.js     # Pengingat (sekali/berulang) & watchdog web
+├── schedulerManager.js     # Pengingat, watchdog web, & tugas agent terjadwal
+├── bot/agentTrigger.js     # Membangunkan agent loop (tugas terjadwal & webhook)
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
 ├── dbHelper.js             # Helper database memori percakapan PostgreSQL
 ├── schema.sql              # Skema tabel (dijalankan otomatis oleh dbHelper)

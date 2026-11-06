@@ -1,10 +1,12 @@
 /**
- * schedulerManager.js — Pengelola Pengingat (Reminder) & Website Watchdog (Pemantau Server)
+ * schedulerManager.js — Pengelola Pengingat (Reminder), Website Watchdog, & Tugas Agent Terjadwal
  *
  * Fitur:
  * - Pengingat sekali jalan atau berulang (harian, hari kerja, mingguan, bulanan) dengan
  *   waktu relatif ("15 menit lagi") atau absolut ("2026-11-02 08:00" WIB).
  * - Watchdog Pemantau URL/Website: cek status tiap N menit, lapor saat down dan pulih.
+ * - Tugas Agent Terjadwal: saat waktunya tiba, agent loop dibangunkan dengan instruksi
+ *   tugas (bot/agentTrigger.js) dan bekerja otonom sampai tuntas — bukan sekadar kirim teks.
  * - Persisten ke scheduler_data.json dengan penulisan atomik (file sementara + rename).
  * - Pengingat baru dihapus/dijadwalkan ulang SETELAH berhasil terkirim.
  */
@@ -28,11 +30,17 @@ const REPEAT_LABEL = {
 
 const TZ_ABBR = { "Asia/Jakarta": "WIB", "Asia/Pontianak": "WIB", "Asia/Makassar": "WITA", "Asia/Jayapura": "WIT" };
 
+const MAX_AGENT_TASKS_PER_SESSION = Number(process.env.AGENT_TASK_MAX_PER_SESSION) || 20;
+const MAX_AGENT_TASK_LEN = 4000;
+
 let reminders = [];
 let watchdogs = [];
+let agentTasks = [];
 let botInstance = null;
 let reminderTickRunning = false;
 let watchdogTickRunning = false;
+let agentTickRunning = false;
+let agentTaskCounter = 0; // penambah id unik: tidak mungkin dua tugas punya id sama
 
 // ============================================================
 // UTILITAS ZONA WAKTU (tanpa dependensi, memakai Intl)
@@ -227,11 +235,17 @@ function loadData() {
     return r;
   });
   watchdogs = (data.watchdogs || []).map(normalizeTarget);
+  agentTasks = (data.agentTasks || []).map((t) => {
+    normalizeTarget(t);
+    if (!REPEATS.includes(t.repeat)) t.repeat = "none";
+    t.timezone = t.timezone || DEFAULT_TZ;
+    return t;
+  });
 }
 
 function saveData() {
   try {
-    writeJsonAtomic(DATA_FILE, { reminders, watchdogs });
+    writeJsonAtomic(DATA_FILE, { reminders, watchdogs, agentTasks });
   } catch (err) {
     console.warn("[Scheduler] Gagal menyimpan scheduler_data.json:", err.message);
   }
@@ -269,7 +283,8 @@ function initScheduler(bot) {
   // unref: interval tidak menahan proses tetap hidup (polling bot yang melakukannya).
   setInterval(() => checkReminders().catch((e) => console.warn("[Scheduler] tick reminder error:", e.message)), 30_000).unref();
   setInterval(() => checkWatchdogs().catch((e) => console.warn("[Scheduler] tick watchdog error:", e.message)), 60_000).unref();
-  console.log("[Scheduler] Sistem Pengingat & Watchdog Server aktif.");
+  setInterval(() => checkAgentTasks().catch((e) => console.warn("[Scheduler] tick agent task error:", e.message)), 30_000).unref();
+  console.log("[Scheduler] Sistem Pengingat, Watchdog, & Tugas Agent Terjadwal aktif.");
 }
 
 async function checkReminders(now = Date.now()) {
@@ -375,6 +390,52 @@ async function checkWatchdogs(now = Date.now()) {
   }
 }
 
+/**
+ * Tick tugas agent terjadwal. Eksekusi agent TIDAK di-await di sini (bisa berjalan
+ * ber-menit) — cukup dipicu sekali; antrean giliran per sesi di bot/turnQueue.js yang
+ * mencegah dua tugas bertabrakan.
+ */
+async function checkAgentTasks(now = Date.now()) {
+  if (!botInstance || agentTickRunning) return;
+  agentTickRunning = true;
+  let changed = false;
+  try {
+    const due = agentTasks.filter((t) => t.targetTime <= now).sort((a, b) => a.targetTime - b.targetTime);
+    if (due.length === 0) return;
+
+    // Lazy require: memutus lingkaran require (agentTrigger -> agentLoop -> ... -> scheduler).
+    const { runAgentTask } = require("./bot/agentTrigger.js");
+
+    for (const t of due) {
+      const recurring = t.repeat && t.repeat !== "none";
+      if (recurring) {
+        const nextMs = nextOccurrence(t.targetTime, t.repeat, t.timezone, now, t.anchorDay);
+        t.targetTime = nextMs;
+        t.lastFiredAt = now;
+      } else {
+        agentTasks = agentTasks.filter((x) => x.id !== t.id);
+      }
+      changed = true;
+
+      runAgentTask({
+        sessionId: t.sessionId,
+        chatId: t.chatId,
+        threadId: t.threadId,
+        sourceLabel: "Tugas Terjadwal",
+        prompt: t.task,
+        notify: true
+      }).then((res) => {
+        if (!res.started) {
+          console.warn(`[Scheduler] Tugas agent ${t.id} tidak jalan: ${res.reason}`);
+        }
+      }).catch((err) => console.error(`[Scheduler] Tugas agent ${t.id} error:`, err.message));
+    }
+  } finally {
+    if (changed) saveData();
+    agentTickRunning = false;
+  }
+}
+
 // ============================================================
 // API
 // ============================================================
@@ -443,27 +504,70 @@ async function addWatchdog({ sessionId, chatId, threadId = null, url, intervalMi
   return watchdog;
 }
 
+/**
+ * Menambahkan tugas agent terjadwal. Saat waktunya tiba, agent dibangunkan dengan `task`
+ * (bukan sekadar teks pengingat) — lihat checkAgentTasks().
+ */
+function addAgentTask({ sessionId, chatId, threadId = null, task, targetTime, repeat = "none", timezone = DEFAULT_TZ }) {
+  if (!REPEATS.includes(repeat)) throw new Error(`repeat harus salah satu dari: ${REPEATS.join(", ")}`);
+  assertTimezone(timezone);
+  const prompt = String(task || "").trim();
+  if (!prompt) throw new Error("Instruksi tugas (task) tidak boleh kosong.");
+  if (prompt.length > MAX_AGENT_TASK_LEN) throw new Error(`Instruksi tugas maksimal ${MAX_AGENT_TASK_LEN} karakter.`);
+
+  const sid = String(sessionId ?? chatId);
+  const perSession = agentTasks.filter((t) => t.sessionId === sid).length;
+  if (perSession >= MAX_AGENT_TASKS_PER_SESSION) {
+    throw new Error(`Batas ${MAX_AGENT_TASKS_PER_SESSION} tugas agent per sesi tercapai. Hapus yang tidak dipakai lewat /tasks.`);
+  }
+
+  const agentTask = {
+    id: `agt_${Date.now()}_${++agentTaskCounter}`,
+    sessionId: sid,
+    chatId: String(chatId ?? splitSessionId(sid).chatId),
+    threadId: threadId ?? null,
+    task: prompt,
+    targetTime: Number(targetTime),
+    repeat,
+    timezone,
+    anchorDay: repeat === "monthly" ? getZonedParts(Number(targetTime), timezone).day : null,
+    lastFiredAt: 0,
+    createdAt: Date.now()
+  };
+  agentTasks.push(agentTask);
+  saveData();
+  return agentTask;
+}
+
 function listTasks(sessionId) {
   const sid = String(sessionId);
   return {
     reminders: reminders.filter((r) => r.sessionId === sid).sort((a, b) => a.targetTime - b.targetTime),
-    watchdogs: watchdogs.filter((w) => w.sessionId === sid)
+    watchdogs: watchdogs.filter((w) => w.sessionId === sid),
+    agentTasks: agentTasks.filter((t) => t.sessionId === sid).sort((a, b) => a.targetTime - b.targetTime)
   };
 }
 
 function getTask(id) {
-  return reminders.find((r) => r.id === id) || watchdogs.find((w) => w.id === id) || null;
+  return (
+    reminders.find((r) => r.id === id) ||
+    watchdogs.find((w) => w.id === id) ||
+    agentTasks.find((t) => t.id === id) ||
+    null
+  );
 }
 
 function removeTask(sessionId, id) {
   const sid = String(sessionId);
   const beforeR = reminders.length;
   const beforeW = watchdogs.length;
+  const beforeA = agentTasks.length;
 
   reminders = reminders.filter((r) => !(r.sessionId === sid && r.id === id));
   watchdogs = watchdogs.filter((w) => !(w.sessionId === sid && w.id === id));
+  agentTasks = agentTasks.filter((t) => !(t.sessionId === sid && t.id === id));
 
-  const removed = beforeR !== reminders.length || beforeW !== watchdogs.length;
+  const removed = beforeR !== reminders.length || beforeW !== watchdogs.length || beforeA !== agentTasks.length;
   if (removed) saveData();
   return removed;
 }
@@ -472,6 +576,8 @@ module.exports = {
   initScheduler,
   addReminder,
   addWatchdog,
+  addAgentTask,
+  checkAgentTasks,
   listTasks,
   getTask,
   removeTask,
