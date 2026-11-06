@@ -4,7 +4,7 @@
 # Port hanya terikat ke localhost — tidak bisa diakses dari luar server.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16  # postgres 16 + ekstensi pgvector (dibutuhkan memori semantik/RAG)
     container_name: nroz-postgres
     restart: unless-stopped
     environment:

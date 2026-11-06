@@ -15,6 +15,7 @@ const { cleanAnswer, cleanFileTags, cleanDraftPreview } = require("./text");
 const { sendLongMessage, getSendOptions, replyText, sendDraft, stopTyping } = require("./send");
 const { handleGeneratedFiles } = require("./fileDelivery");
 const { triggerBackgroundCompaction } = require("./compaction");
+const { ingestChatMessage } = require("./knowledge");
 
 // Sesi AI yang sedang berjalan (untuk /stop): sessionId -> { cancelled: boolean }
 const activeTurnSessions = new Map();
@@ -284,6 +285,10 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       await saveMemory(sessionId, "assistant", answer);
       appendRawLog(sessionId, "assistant", answer);
     }
+    // Memori semantik (RAG): jawaban final masuk indeks pencarian. Fire-and-forget.
+    ingestChatMessage(sessionId, "assistant", answer).catch((e) =>
+      console.warn("[Knowledge] ingest jawaban gagal:", e.message)
+    );
 
     // 4. Otomatis buat & kirim file atau ZIP jika diminta
     await handleGeneratedFiles(chatId, msg, rawAnswer, userPromptForFiles, turnMediaSent);

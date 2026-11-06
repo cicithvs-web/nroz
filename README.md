@@ -76,6 +76,14 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
    - Mode `notify`: payload diteruskan ke chat. Mode `agent`: payload membangunkan AI Agent untuk
      ditindaklanjuti otomatis. Token hook acak 32-hex; data hook tersimpan di `webhook_data.json`.
 
+10. **🧠 Memori Semantik / RAG (`search_knowledge`, pgvector)**:
+    - Dokumen yang di-upload user (PDF, DOCX, teks, kode) dan percakapan penting dipecah jadi chunk,
+      di-embed, dan disimpan di PostgreSQL + pgvector. Tool `search_knowledge` mencari berdasarkan makna,
+      bukan cocok kata kunci.
+    - Butuh image `pgvector/pgvector:pg16` (sudah diatur di `docker-compose.yml`). Model/dimensi embedding
+      diatur lewat `EMBED_MODEL` / `EMBED_DIM` di `.env`; matikan indeks percakapan otomatis dengan
+      `KNOWLEDGE_INGEST_CHAT=off`.
+
 ---
 
 ## 📁 Struktur Proyek
@@ -108,6 +116,7 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
 ├── schedulerManager.js     # Pengingat, watchdog web, & tugas agent terjadwal
 ├── webhookManager.js       # Webhook masuk: event eksternal -> notif chat / agent
 ├── bot/agentTrigger.js     # Membangunkan agent loop (tugas terjadwal & webhook)
+├── bot/knowledge.js        # Memori semantik RAG (pgvector + embedding)
 ├── webPreviewManager.js    # Pengelola Cloudflare Tunnel
 ├── dbHelper.js             # Helper database memori percakapan PostgreSQL
 ├── schema.sql              # Skema tabel (dijalankan otomatis oleh dbHelper)

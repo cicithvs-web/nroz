@@ -71,6 +71,8 @@ function describeToolCall(name, args = {}) {
       const ulang = args.repeat && args.repeat !== "none" ? ` (${oneLine(args.repeat, 10)})` : "";
       return `menjadwalkan tugas otonom ${kapan}${ulang}: ${oneLine(args.task, 50)}`;
     }
+    case "search_knowledge":
+      return `mencari semantik "${oneLine(args.query, 50)}"${args.source ? ` di ${oneLine(args.source, 20)}` : ""}`;
     case "media_download":
       return `mengunduh media dari ${oneLine(args.url, 70)}`;
     case "render_remotion_video": {

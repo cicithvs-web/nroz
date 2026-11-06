@@ -26,6 +26,7 @@ const { transcribeAudio } = require("../voiceManager.js");
 const { resolveInWorkspace } = require("../lib/pathGuard");
 const { isOwner } = require("./config");
 const { handleRestore } = require("./dbBackup");
+const { ingestFileBuffer, ingestChatMessage } = require("./knowledge");
 
 /**
  * Menyimpan file kiriman user ke workspace dari HOST. Sandbox bisa menaruh symlink
@@ -91,6 +92,10 @@ function registerHandlers(bot) {
 
         await saveMemory(sessionId, "user", userText, msg.message_id);
         appendRawLog(sessionId, "user", userText, { messageId: msg.message_id });
+        // Memori semantik (RAG): pesan cukup panjang masuk indeks pencarian. Fire-and-forget.
+        ingestChatMessage(sessionId, "user", userText).catch((e) =>
+          console.warn("[Knowledge] ingest chat gagal:", e.message)
+        );
 
         await executeAICompletionAndReply({
           msg,
@@ -238,6 +243,15 @@ function registerHandlers(bot) {
         const ws = ensureWorkspaceStructure(sessionId);
         const savedFilePath = path.join(ws.uploadsDir, safeName);
         writeUploadSafely(sessionId, savedFilePath, bufferData);
+
+        // 2. Indekskan isi dokumen ke memori semantik (RAG) di latar belakang —
+        //    tidak menunda balasan meski dokumennya besar.
+        ingestFileBuffer(sessionId, safeName, bufferData)
+          .then((res) => {
+            if (res.stored > 0) console.log(`[Knowledge] '${safeName}' terindeks (${res.stored} chunk).`);
+            else if (res.skipped) console.log(`[Knowledge] '${safeName}' dilewati: ${res.skipped}`);
+          })
+          .catch((e) => console.warn(`[Knowledge] Gagal mengindeks '${safeName}':`, e.message));
 
         const fileSizeKb = (bufferData.length / 1024).toFixed(1);
         const prompt = (msg.caption || "").trim();

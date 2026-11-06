@@ -790,6 +790,38 @@ const TOOL_DEFINITIONS = [
     },
   },
 
+  // --- x) search_knowledge ---
+  {
+    type: "function",
+    function: {
+      name: "search_knowledge",
+      description:
+        "Pencarian SEMANTIK (RAG) atas dokumen yang pernah di-upload user (PDF, DOCX, teks, kode) dan arsip " +
+        "percakapan masa lalu. Mencari berdasarkan makna, bukan cocok kata kunci persis — jadi bisa menemukan " +
+        "jawaban walau kata-katanya berbeda. Gunakan SEBELUM menjawab pertanyaan yang mungkin sudah terjawab di " +
+        "dokumen/obrolan lama (contoh: 'apa isi kontrak yang gue upload minggu lalu soal penalty?'). " +
+        "Untuk mencocokkan kata persis di arsip chat, gunakan search_raw_memory.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Pertanyaan atau topik yang dicari secara semantik, misal 'aturan denda keterlambatan proyek'.",
+          },
+          source: {
+            type: "string",
+            description: "Filter sumber opsional: 'upload' (dokumen user), 'chat' (percakapan), atau nama sumber spesifik. Kosong = semua.",
+          },
+          limit: {
+            type: "number",
+            description: "Jumlah potongan hasil (default 6, maks 20).",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+
 ];
 
 module.exports = { TOOL_DEFINITIONS };
