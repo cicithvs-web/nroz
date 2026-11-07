@@ -36,6 +36,32 @@ ok() { printf '  \033[0;32mOK\033[0m   %s\n' "$*"; }
 bad() { printf '  \033[0;31mKURANG\033[0m %s\n' "$*"; }
 warn() { printf '  \033[0;33mPERHATIAN\033[0m %s\n' "$*"; }
 
+# Nama app pm2 tidak selalu sama antar server (ada yang "nroz", ada yang "nroz-bot").
+# Script WAJIB memakai app yang sudah jalan, bukan membuat yang baru: dua proses bot
+# dengan BOT_TOKEN sama akan saling berebut polling Telegram (error 409 dan balasan
+# ganda). Dulu pengujian dan perintah start sama-sama memakai nama "nroz" secara
+# hardcoded, sehingga di server dengan app "nroz-bot" doctor melaporkan bot tidak jalan
+# lalu menyarankan menjalankan script ini — yang justru menambah proses kedua.
+# Override manual: PM2_APP=nama bash scripts/setup-vps.sh
+PM2_APP_PREFERRED="${PM2_APP:-}"
+pm2_app_name() {
+  if [ -n "$PM2_APP_PREFERRED" ]; then
+    echo "$PM2_APP_PREFERRED"
+    return
+  fi
+  if command -v pm2 >/dev/null 2>&1; then
+    local name
+    for name in nroz nroz-bot; do
+      if pm2 describe "$name" >/dev/null 2>&1; then
+        echo "$name"
+        return
+      fi
+    done
+  fi
+  echo "nroz" # belum ada app apa pun: pakai nama baku
+}
+PM2_APP="$(pm2_app_name)"
+
 MISSING=0
 check() { # check "label" "perintah-uji" ["cara-mengatasi"]
   local rc=0
@@ -100,7 +126,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   check "image sandbox Docker" "docker image inspect nroz-sandbox:latest" "docker build -f Dockerfile.sandbox -t nroz-sandbox:latest ."
   check "swap aktif" "[ \"\$(awk '/^SwapTotal/ {print \$2}' /proc/meminfo)\" -gt 102400 ]" "bash scripts/setup-vps.sh --swap-mb=4096"
   check "libnss3 (dipakai Chrome headless)" "ldconfig -p | grep -q libnss3" "bash scripts/setup-vps.sh"
-  check "proses bot jalan di pm2" "pm2 describe nroz" "bash scripts/setup-vps.sh"
+  check "proses bot jalan di pm2" "pm2 describe $PM2_APP" "bash scripts/setup-vps.sh"
   check "auto-start saat reboot" "systemctl list-unit-files 2>/dev/null | grep -q pm2-root" "pm2 startup"
   echo
   if [ "$MISSING" -gt 0 ]; then
@@ -293,15 +319,17 @@ if [ "$START_BOT" -eq 1 ]; then
   if ! grep -qE '^BOT_TOKEN=[A-Za-z0-9]' .env; then
     echo
     warn "BOT_TOKEN belum diisi di .env — bot tidak kuk jalankan."
-    echo "Isi .env lalu jalankan ulang script ini, atau: pm2 start bot.js --name nroz"
+    echo "Isi .env lalu jalankan ulang script ini, atau: pm2 start bot.js --name $PM2_APP"
     exit 0
   fi
   command -v pm2 >/dev/null || npm install -g pm2
-  say "Menjalankan bot lewat pm2 (app: nroz)"
-  if pm2 describe nroz >/dev/null 2>&1; then
-    pm2 reload nroz --update-env
+  # pm2 baru terpasang? hitung ulang nama app-nya.
+  PM2_APP="$(pm2_app_name)"
+  say "Menjalankan bot lewat pm2 (app: $PM2_APP)"
+  if pm2 describe "$PM2_APP" >/dev/null 2>&1; then
+    pm2 reload "$PM2_APP" --update-env
   else
-    pm2 start bot.js --name nroz
+    pm2 start bot.js --name "$PM2_APP"
   fi
   pm2 save
 
