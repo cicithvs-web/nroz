@@ -857,6 +857,35 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  // --- z) analyze_video_reference ---
+  {
+    type: "function",
+    function: {
+      name: "analyze_video_reference",
+      description:
+        "Menganalisis VIDEO REFERENSI di workspace (kiriman user atau hasil media_download) agar kamu bisa meniru " +
+        "gaya visualnya di Remotion. Tool menghasilkan: metadata (durasi, resolusi, fps), ritme scene cut " +
+        "(potongan per 10 detik, rata-rata panjang shot), contact sheet frame yang tersimpan di artifacts/ " +
+        "(bisa dikirim ke user dengan send_photo), dan SPEC GAYA VISUAL dari vision (palet, layout, tipografi, " +
+        "motion, tempo, rekomendasi struktur scene). WAJIB dipanggil sebelum menulis kode render_remotion_video " +
+        "ketika user meminta video 'seperti ini', 'niru gaya ini', atau melampirkan video referensi.",
+      parameters: {
+        type: "object",
+        properties: {
+          video_path: {
+            type: "string",
+            description: "Path video referensi di workspace (contoh: '/workspace/uploads/referensi.mp4' atau '/workspace/nama_video.mp4').",
+          },
+          focus: {
+            type: "string",
+            description: "Opsional. Aspek yang ingin ditekankan user (misal: 'warna dan tempo', 'gaya teksnya saja').",
+          },
+        },
+        required: ["video_path"],
+      },
+    },
+  },
 ];
 
 module.exports = { TOOL_DEFINITIONS };

@@ -49,3 +49,19 @@ Skill ini digunakan setiap kali user meminta membuat, merancang, atau merender v
 - Hindari array `inputRange` terbalik pada `interpolate()`. Nilai `inputRange` harus selalu meningkat secara monoton (misal: `[0, 1]`, bukan `[1, 0]`).
 - Desain modern: latar belakang gelap gradien estetik, typography besar kontras tinggi, tata letak rapi, elemen visual pendukung yang dinamis.
 - Resolusi standar: `1080x1920` (9:16 vertikal untuk Shorts/Reels/TikTok) atau `1920x1080` (16:9 lanskap).
+
+## Video Referensi ("bikin seperti ini")
+- Saat user melampirkan video referensi (upload ≤20 MB otomatis disimpan ke
+  `uploads/`, atau kirim link lalu unduh dengan `media_download`) dan meminta gaya
+  serupa: PANGGIL `analyze_video_reference({"video_path": "..."})` SEBELUM menulis kode.
+- Tool menghasilkan: metadata (durasi/rasio/fps), ritme scene cut, contact sheet
+  frame di `artifacts/` (kirim ke user dengan `send_photo` bila perlu konfirmasi),
+  dan SPEC GAYA VISUAL dari vision.
+- Alur kerja yang benar: analisis → simpulkan rencana 2-3 kalimat → konfirmasi
+  durasi/konten via `ask_user` bila ambigu → `render_remotion_video` mengikuti spec
+  (rasio & tempo mengikuti referensi kecuali user minta lain; durasi tetap hormati
+  batas server).
+- Meniru GAYA (warna, layout, tipografi, motion, tempo), bukan menyalin konten/objek
+  video referensi.
+- Simpan gaya yang sudah disetujui user sebagai preset: `save_skill` dengan nama
+  seperti `gaya_promo_neon` — panggilan berikutnya cukup menyebut nama presetnya.

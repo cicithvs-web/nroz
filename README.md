@@ -89,6 +89,13 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
       pilihan dan MENUNGGU jawaban (default 10 menit, maks 60) sebelum melanjutkan. Jawaban bisa lewat
       tombol atau ketik langsung; kalau tidak dijawab sampai timeout, agent lanjut dengan asumsi terbaik.
 
+12. **🎬 Analisis Video Referensi (`analyze_video_reference`)**:
+    - Kirim video referensi (≤ 20 MB, batas Telegram) atau link (diunduh via `media_download`) + caption
+      "bikin kayak gini" — bot mengekstrak metadata (`ffprobe`), ritme scene cut (`ffmpeg`), dan contact
+      sheet frame, lalu vision model menyusun spec gaya: palet, layout, tipografi, motion, tempo.
+    - Agent menulis kode Remotion mengikuti spec tersebut; hasil analisis bisa disimpan sebagai preset
+      gaya via `save_skill` agar bisa dipakai ulang tanpa kirim referensi lagi.
+
 ---
 
 ## 📁 Struktur Proyek

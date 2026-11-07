@@ -501,8 +501,109 @@ function registerHandlers(bot) {
     });
   }
 
+  // === HANDLER VIDEO & VIDEO NOTE (REFERENSI UNTUK ANALISIS GAYA) ===
+  async function handleVideoMsg(bot, msg, isNote = false) {
+    if (msg.from && msg.from.is_bot) return;
+
+    const mediaObj = isNote ? msg.video_note : msg.video;
+    if (!mediaObj || !mediaObj.file_id) return;
+
+    const caption = isNote ? "" : (msg.caption || "");
+    if (hasIgnorePrefix(caption)) return;
+
+    const access = await checkUserAccess(msg);
+    if (!access.allowed) {
+      return handleAccessDenied(msg, access.status);
+    }
+
+    const sessionId = getSessionId(msg);
+
+    // Jika topik / chat sedang di-pause, bot diam
+    if (await isChatPaused(sessionId)) {
+      return;
+    }
+
+    if (shouldIgnoreGroupMessage(msg, caption)) {
+      return;
+    }
+
+    const chatId = msg.chat.id;
+    await runQueued(msg, sessionId, async () => {
+      let typing;
+      try {
+        typing = startTyping(chatId, msg.message_thread_id);
+
+        // Bot API hanya mengizinkan unduh file <= 20 MB; yang besar suruh pakai link (yt-dlp).
+        if (mediaObj.file_size && mediaObj.file_size > 20 * 1024 * 1024) {
+          stopTyping(typing);
+          return await replyText(
+            msg,
+            "📹 Video terlalu besar untuk dikirim langsung ke bot (batas Telegram 20 MB).\n\n" +
+              "Solusi: kirim sebagai *link* (YouTube/TikTok/Drive publik) — aku unduh sendiri dengan media_download — " +
+              "atau kompres/trim dulu sekitar 30-60 detik."
+          );
+        }
+
+        const file = await bot.getFile(mediaObj.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
+        const bufferData = Buffer.from(response.data);
+
+        const ws = ensureWorkspaceStructure(sessionId);
+        const ext = path.extname(file.file_path || "") || ".mp4";
+        const rawName = (!isNote && msg.video?.file_name) || `${isNote ? "video_note" : "video"}_${Date.now()}${ext}`;
+        const safeName = sanitizePath(rawName).replace(/[\/\\]/g, "_") || `video_${Date.now()}.mp4`;
+        const savedFilePath = path.join(ws.uploadsDir, safeName);
+        writeUploadSafely(sessionId, savedFilePath, bufferData);
+        const sizeMb = (bufferData.length / 1024 / 1024).toFixed(1);
+
+        const userPrompt =
+          `🎬 [Video Referensi Diterima]\n` +
+          `• Nama file: \`${safeName}\` (${sizeMb} MB)\n` +
+          `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+          `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+          `• Instruksi user: ${caption.trim() || "(tanpa caption)"}\n\n` +
+          `Instruksi AI Agent: File video mentah tersimpan di \`/workspace/uploads/${safeName}\`.\n` +
+          `Jika user ingin video yang MIRIP gaya video ini (kata "kayak gini", "niru", "referensi", dsb), ` +
+          `PANGGIL tool \`analyze_video_reference\` dengan video_path di atas — hasilnya metadata, ritme cut, ` +
+          `contact sheet, dan spec gaya visual. Setelah itu simpulkan rencana videomu dalam 2-3 kalimat, ` +
+          `konfirmasi singkat lewat \`ask_user\` bila durasi/konten masih ambigu, lalu eksekusi dengan ` +
+          `\`render_remotion_video\`. Jika user hanya bertanya soal isi video, jawab dari hasil analisis.`;
+
+        await saveMemory(
+          sessionId,
+          "user",
+          `[Kirim Video Referensi]: ${safeName} (${sizeMb} MB). Instruksi: ${caption.trim() || "-"}`,
+          msg.message_id
+        );
+        appendRawLog(
+          sessionId,
+          "user",
+          `[Kirim Video Referensi]: ${safeName} (${sizeMb} MB). Instruksi: ${caption.trim() || "-"}`,
+          { messageId: msg.message_id }
+        );
+
+        const currentHistory = await getHistoryForAI(sessionId, 12);
+        await executeAICompletionAndReply({
+          msg,
+          sessionId,
+          messages: buildMessagesWithSystem([...currentHistory, { role: "user", content: userPrompt }], sessionId),
+          userPromptForFiles: caption.trim() || "analisis video referensi ini",
+          typing
+        });
+      } catch (err) {
+        console.error("VIDEO ERROR:", err);
+        await replyText(msg, "Gagal memproses video.");
+      } finally {
+        stopTyping(typing);
+      }
+    });
+  }
+
   bot.on("voice", (msg) => handleVoiceOrAudio(bot, msg, true));
   bot.on("audio", (msg) => handleVoiceOrAudio(bot, msg, false));
+  bot.on("video", (msg) => handleVideoMsg(bot, msg, false));
+  bot.on("video_note", (msg) => handleVideoMsg(bot, msg, true));
 }
 
 module.exports = { registerHandlers, writeUploadSafely };
