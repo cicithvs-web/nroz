@@ -176,6 +176,11 @@ async function handleAskCallback(query) {
  * masuk antrean AI. @returns {boolean} true jika teks dipakai sebagai jawaban.
  */
 function takePendingAskAnswer(sessionId, text) {
+  // Hanya pesan teks yang boleh menjawab. Event "message" di bot/handlers.js juga menyala
+  // untuk foto/video/dokumen yang tidak punya .text; tanpa penjagaan ini kiriman media
+  // akan menutup pertanyaan dengan jawaban kosong dan agent melanjutkan dengan asumsi salah.
+  if (typeof text !== "string" || !text.trim()) return false;
+
   const list = pendingAsks.get(String(sessionId));
   if (!list || list.length === 0) return false;
   const entry = list.shift();

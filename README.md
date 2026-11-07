@@ -90,9 +90,15 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
       tombol atau ketik langsung; kalau tidak dijawab sampai timeout, agent lanjut dengan asumsi terbaik.
 
 12. **🎬 Analisis Video Referensi (`analyze_video_reference`)**:
-    - Kirim video referensi (≤ 20 MB, batas Telegram) atau link (diunduh via `media_download`) + caption
-      "bikin kayak gini" — bot mengekstrak metadata (`ffprobe`), ritme scene cut (`ffmpeg`), dan contact
-      sheet frame, lalu vision model menyusun spec gaya: palet, layout, tipografi, motion, tempo.
+    - Kirim video referensi (≤ 20 MB, batas Telegram — video biasa, video note, GIF, atau dikirim sebagai
+      file) atau link (diunduh via `media_download`) + caption "bikin kayak gini" — bot mengekstrak
+      metadata (`ffprobe`), ritme scene cut (`ffmpeg`), dan contact sheet frame, lalu vision model
+      menyusun spec gaya: palet, layout, tipografi, motion, tempo.
+    - Orientasi/rasio dikoreksi dari metadata rotasi (video HP sering tersimpan landscape + rotasi 90°),
+      frame sheet diambil di **tengah tiap shot** supaya scene pembuka ikut terwakili, dan grid contact
+      sheet menyesuaikan jumlah frame sehingga tidak ada sel hitam yang membingungkan model.
+    - Contact sheet disimpan di `artifacts/refsheets/` (di luar jangkauan auto-kirim gambar), kirim manual
+      dengan `send_photo` bila perlu konfirmasi ke user.
     - Agent menulis kode Remotion mengikuti spec tersebut; hasil analisis bisa disimpan sebagai preset
       gaya via `save_skill` agar bisa dipakai ulang tanpa kirim referensi lagi.
 

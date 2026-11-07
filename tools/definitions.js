@@ -893,11 +893,12 @@ const TOOL_DEFINITIONS = [
       name: "analyze_video_reference",
       description:
         "Menganalisis VIDEO REFERENSI di workspace (kiriman user atau hasil media_download) agar kamu bisa meniru " +
-        "gaya visualnya di Remotion. Tool menghasilkan: metadata (durasi, resolusi, fps), ritme scene cut " +
-        "(potongan per 10 detik, rata-rata panjang shot), contact sheet frame yang tersimpan di artifacts/ " +
-        "(bisa dikirim ke user dengan send_photo), dan SPEC GAYA VISUAL dari vision (palet, layout, tipografi, " +
-        "motion, tempo, rekomendasi struktur scene). WAJIB dipanggil sebelum menulis kode render_remotion_video " +
-        "ketika user meminta video 'seperti ini', 'niru gaya ini', atau melampirkan video referensi.",
+        "gaya visualnya di Remotion. Tool menghasilkan: metadata (durasi, orientasi/rasio yang sudah dikoreksi " +
+        "rotasi, fps), ritme scene cut (potongan per 10 detik, rata-rata panjang shot), contact sheet frame " +
+        "yang tersimpan di artifacts/refsheets/ (bisa dikirim ke user dengan send_photo), dan SPEC GAYA VISUAL " +
+        "dari vision (palet, layout, tipografi, motion, tempo, rekomendasi struktur scene). WAJIB dipanggil " +
+        "sebelum menulis kode render_remotion_video ketika user meminta video 'seperti ini', 'niru gaya ini', " +
+        "atau melampirkan video referensi.",
       parameters: {
         type: "object",
         properties: {

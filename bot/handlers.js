@@ -59,7 +59,10 @@ function registerHandlers(bot) {
     const sessionId = getSessionId(msg);
 
     // Jawaban teks untuk ask_user yang sedang menunggu — dipakai langsung, tanpa giliran AI.
-    if (takePendingAskAnswer(sessionId, msg.text)) {
+    // Syarat msg.text penting: event "message" juga menyala untuk foto/video/dokumen yang
+    // tidak punya .text, dan tanpa penjagaan ini kiriman media akan "menjawab" pertanyaan
+    // yang sedang menunggu dengan string kosong.
+    if (msg.text && takePendingAskAnswer(sessionId, msg.text)) {
       return;
     }
 
@@ -366,6 +369,22 @@ function registerHandlers(bot) {
             typing
           });
           return;
+        } else if (
+          [".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".gif"].includes(ext)
+        ) {
+          // Video yang dikirim sebagai dokumen (cara umum menghindari kompresi Telegram).
+          userPrompt =
+            `🎬 [Video Referensi Diterima — dikirim sebagai file]\n` +
+            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+            `• Instruksi user: ${prompt || "(tanpa caption)"}\n\n` +
+            `Instruksi AI Agent: File video mentah tersimpan di \`/workspace/uploads/${safeName}\`.\n` +
+            `Jika user ingin video yang MIRIP gaya video ini (kata "kayak gini", "niru", "referensi", dsb), ` +
+            `PANGGIL tool \`analyze_video_reference\` dengan video_path di atas — hasilnya metadata, ritme cut, ` +
+            `contact sheet, dan spec gaya visual. Setelah itu simpulkan rencana videomu dalam 2-3 kalimat, ` +
+            `konfirmasi singkat lewat \`ask_user\` bila durasi/konten masih ambigu, lalu eksekusi dengan ` +
+            `\`render_remotion_video\`. Jika user hanya bertanya soal isi video, jawab dari hasil analisis.`;
         } else {
           userPrompt =
             `📁 [File Diterima]\n` +
@@ -501,11 +520,12 @@ function registerHandlers(bot) {
     });
   }
 
-  // === HANDLER VIDEO & VIDEO NOTE (REFERENSI UNTUK ANALISIS GAYA) ===
-  async function handleVideoMsg(bot, msg, isNote = false) {
+  // === HANDLER VIDEO, VIDEO NOTE & GIF (REFERENSI UNTUK ANALISIS GAYA) ===
+  async function handleVideoMsg(bot, msg, kind = "video") {
     if (msg.from && msg.from.is_bot) return;
 
-    const mediaObj = isNote ? msg.video_note : msg.video;
+    const isNote = kind === "video_note";
+    const mediaObj = msg[kind];
     if (!mediaObj || !mediaObj.file_id) return;
 
     const caption = isNote ? "" : (msg.caption || "");
@@ -551,7 +571,7 @@ function registerHandlers(bot) {
 
         const ws = ensureWorkspaceStructure(sessionId);
         const ext = path.extname(file.file_path || "") || ".mp4";
-        const rawName = (!isNote && msg.video?.file_name) || `${isNote ? "video_note" : "video"}_${Date.now()}${ext}`;
+        const rawName = mediaObj.file_name || `${kind}_${Date.now()}${ext}`;
         const safeName = sanitizePath(rawName).replace(/[\/\\]/g, "_") || `video_${Date.now()}.mp4`;
         const savedFilePath = path.join(ws.uploadsDir, safeName);
         writeUploadSafely(sessionId, savedFilePath, bufferData);
@@ -602,8 +622,9 @@ function registerHandlers(bot) {
 
   bot.on("voice", (msg) => handleVoiceOrAudio(bot, msg, true));
   bot.on("audio", (msg) => handleVoiceOrAudio(bot, msg, false));
-  bot.on("video", (msg) => handleVideoMsg(bot, msg, false));
-  bot.on("video_note", (msg) => handleVideoMsg(bot, msg, true));
+  bot.on("video", (msg) => handleVideoMsg(bot, msg, "video"));
+  bot.on("video_note", (msg) => handleVideoMsg(bot, msg, "video_note"));
+  bot.on("animation", (msg) => handleVideoMsg(bot, msg, "animation"));
 }
 
 module.exports = { registerHandlers, writeUploadSafely };

@@ -54,9 +54,12 @@ Skill ini digunakan setiap kali user meminta membuat, merancang, atau merender v
 - Saat user melampirkan video referensi (upload ≤20 MB otomatis disimpan ke
   `uploads/`, atau kirim link lalu unduh dengan `media_download`) dan meminta gaya
   serupa: PANGGIL `analyze_video_reference({"video_path": "..."})` SEBELUM menulis kode.
-- Tool menghasilkan: metadata (durasi/rasio/fps), ritme scene cut, contact sheet
-  frame di `artifacts/` (kirim ke user dengan `send_photo` bila perlu konfirmasi),
-  dan SPEC GAYA VISUAL dari vision.
+- Tool menghasilkan: metadata (durasi, orientasi/rasio yang sudah dikoreksi rotasi, fps),
+  ritme scene cut, contact sheet frame di `artifacts/refsheets/` (kirim ke user dengan
+  `send_photo` bila perlu konfirmasi), dan SPEC GAYA VISUAL dari vision.
+- Rasio video ikuti baris "Orientasi" pada hasil analisis, bukan tebakan dari bentuk
+  contact sheet: video HP sering tersimpan landscape + metadata rotasi, dan tool sudah
+  mengoreksinya.
 - Alur kerja yang benar: analisis → simpulkan rencana 2-3 kalimat → konfirmasi
   durasi/konten via `ask_user` bila ambigu → `render_remotion_video` mengikuti spec
   (rasio & tempo mengikuti referensi kecuali user minta lain; durasi tetap hormati
