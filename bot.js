@@ -28,6 +28,8 @@ const { registerRenderDelivery } = require("./bot/renderDelivery");
 const { registerCommands, registerBotCommands } = require("./bot/commands");
 const { registerCallbacks } = require("./bot/callbacks");
 const { registerHandlers } = require("./bot/handlers");
+const { handleGenerationStopped } = require("./bot/terminalStream");
+const { activeTurnSessions } = require("./bot/agentLoop");
 
 // Error yang lolos dari handler async tidak boleh mematikan bot (Node >= 15 keluar
 // pada unhandled rejection). Dicatat lengkap supaya penyebabnya tetap terlihat.
@@ -51,6 +53,28 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 ctx.bot = bot;
+
+// Update `stopped_message_generation` (Bot API 10.3: user menekan stop pada draft
+// yang bisa dihentikan) belum dikenal node-telegram-bot-api — tanpa ini update-nya
+// dibuang diam-diam. Draft terminal streaming men-stop job-nya; draft respons AI
+// yang distop dianggap seperti /stop.
+const origProcessUpdate = bot.processUpdate.bind(bot);
+bot.processUpdate = (update) => {
+  try {
+    const stopped = update && update.stopped_message_generation;
+    if (stopped) {
+      handleGenerationStopped(stopped).then((handled) => {
+        if (handled) return;
+        const chatId = String(stopped.chat?.id ?? "");
+        const sessionId = stopped.message_thread_id ? `${chatId}_t${stopped.message_thread_id}` : chatId;
+        if (activeTurnSessions.has(sessionId)) activeTurnSessions.get(sessionId).cancelled = true;
+      });
+    }
+  } catch (err) {
+    console.warn("[Bot] Gagal memproses stop generation:", err.message);
+  }
+  return origProcessUpdate(update);
+};
 
 initScheduler(bot);
 initWebhooks(bot);

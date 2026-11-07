@@ -49,7 +49,7 @@ const TOOL_DEFINITIONS = [
       description:
         "Membaca status dan output perintah yang dijalankan dengan run_command {\"background\": true}. " +
         "Kosongkan job_id untuk melihat daftar semua job background. " +
-        "Jangan polling berulang-ulang — cek sekali setelah kamu menyelesaikan pekerjaan lain atau setelah user bertanya.",
+        "Jangan polling berulang-ulang — untuk MENUNGGU job selesai gunakan wait_command_output.",
       parameters: {
         type: "object",
         properties: {
@@ -59,6 +59,34 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: [],
+      },
+    },
+  },
+
+  // --- a3) wait_command_output ---
+  {
+    type: "function",
+    function: {
+      name: "wait_command_output",
+      description:
+        "MENUNGGU job background selesai (blokir sampai kelar atau timeout) lalu mengembalikan status akhir " +
+        "beserta output terakhirnya. SATU panggilan ini menggantikan poling check_command_output berulang — " +
+        "jauh lebih hemat langkah dan token. Selagi menunggu, user melihat live tail terminalnya di chat. " +
+        "Gunakan untuk instalasi paket, build, download, atau proses apa pun yang hasilnya langsung dibutuhkan " +
+        "langkah berikutnya. Kalau timeout tercapai, panggil lagi dengan timeout lebih panjang.",
+      parameters: {
+        type: "object",
+        properties: {
+          job_id: {
+            type: "string",
+            description: "ID job dari hasil run_command background, misal 'bg3'.",
+          },
+          timeout_seconds: {
+            type: "number",
+            description: "Batas menunggu dalam detik (default 600, maks 600).",
+          },
+        },
+        required: ["job_id"],
       },
     },
   },

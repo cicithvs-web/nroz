@@ -5,6 +5,7 @@
 const fs = require("fs");
 const { execInSandboxAsync, startBackgroundInSandbox } = require("../sandboxManager.js");
 const { getRenderQueueStatus } = require("../remotionManager.js");
+const { startTerminalStream } = require("../bot/terminalStream.js");
 const { truncate, toSandboxPath, exitCodeOf, toHostPathPreview, tailFile } = require("./common");
 
 /** Job run_command yang jalan di latar belakang: id -> { logPath, exitPath, startedAt, command } */
@@ -27,7 +28,7 @@ function lowPriorityFor(command) {
  * Bebas tanpa larangan perintah karena terisolasi 100% di dalam container Docker.
  * background=true -> perintah dijalankan tanpa menunggu, cek hasil pakai check_command_output.
  */
-async function toolRunCommand({ command, cwd, sessionId, background }) {
+async function toolRunCommand({ command, cwd, sessionId, background, chatId, threadId }) {
   if (!command || typeof command !== "string") {
     return "❌ Parameter 'command' wajib berupa string.";
   }
@@ -46,9 +47,18 @@ async function toolRunCommand({ command, cwd, sessionId, background }) {
     try {
       const { logPath, exitPath } = startBackgroundInSandbox(sessionId || "default", sandboxCommand, jobId, { lowPriority });
       backgroundJobs.set(jobId, { logPath, exitPath, startedAt: Date.now(), command: toHostPathPreview(command) });
+      // Live tail: chat pribadi = draft streaming native, grup = pesan yang diedit berkala.
+      startTerminalStream(jobId, {
+        sessionId: sessionId || "default",
+        chatId,
+        threadId,
+        logPath,
+        exitPath,
+        command: toHostPathPreview(command)
+      });
       return (
         `${catatanPrioritas}🌙 Job ${jobId} dijalankan di latar belakang.\n` +
-        `• Cek hasil dengan tool check_command_output({"job_id":"${jobId}"})\n` +
+        `• Cek hasil dengan check_command_output, atau tunggu sekali jalan dengan wait_command_output({"job_id":"${jobId}"})\n` +
         `• Log: /workspace/.bg/${jobId}.log\n` +
         `Lanjutkan pekerjaan lain, jangan tidur dengan sleep.`
       );
@@ -122,6 +132,33 @@ async function toolCheckCommandOutput({ job_id }) {
 }
 
 /**
+ * Tool: wait_command_output
+ * MENUNGGU job background selesai (maks 10 menit) lalu mengembalikan status akhirnya.
+ * Satu panggilan menggantikan poling check_command_output berulang-ulang yang memakan
+ * ronde tool dan token. Selagi menunggu, user melihat live tail terminal di chat.
+ */
+async function toolWaitCommandOutput({ job_id, timeout_seconds }) {
+  const job = backgroundJobs.get(String(job_id));
+  if (!job) {
+    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${[...backgroundJobs.keys()].join(", ") || "(kosong)"}`;
+  }
+
+  const timeoutMs = Math.min(Math.max(Number(timeout_seconds) || 600, 5), 600) * 1000;
+  const start = Date.now();
+  while (!fs.existsSync(job.exitPath) && Date.now() - start < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  if (!fs.existsSync(job.exitPath)) {
+    return (
+      `⏱️ Job ${job_id} masih berjalan setelah ${Math.round(timeoutMs / 1000)} detik — menunggu dihentikan.\n` +
+      `Panggil lagi wait_command_output dengan timeout lebih panjang, atau cek sekilas lewat check_command_output.`
+    );
+  }
+  return toolCheckCommandOutput({ job_id });
+}
+
+/**
  * Tool: run_code
  * Menjalankan kode dalam bahasa yang didukung (JavaScript, Python, Bash)
  * di dalam Persistent Docker Sandbox user.
@@ -168,4 +205,4 @@ async function toolRunCode({ language, code, sessionId }) {
   }
 }
 
-module.exports = { toolRunCommand, toolCheckCommandOutput, toolRunCode };
+module.exports = { toolRunCommand, toolCheckCommandOutput, toolWaitCommandOutput, toolRunCode };

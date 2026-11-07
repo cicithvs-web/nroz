@@ -27,6 +27,8 @@ function describeToolCall(name, args = {}) {
     }
     case "check_command_output":
       return `mengecek output job ${oneLine(args.job_id, 20, "semua")}`;
+    case "wait_command_output":
+      return `menunggu job ${oneLine(args.job_id, 20, "?")} selesai`;
     case "run_code": {
       const firstLine = oneLine(
         String(args.code || "")

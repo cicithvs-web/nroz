@@ -252,6 +252,8 @@ function execInSandboxAsync(sessionId, command, options = {}) {
  * Menjalankan perintah tanpa menunggu selesai (mode background).
  * Output ditampung ke <workspace>/.bg/<jobId>.log dan exit code ke .exit,
  * keduanya terlihat dari host maupun container karena folder workspace ter-mount.
+ * Script menyertakan marker `NROZ_BG:<jobId>` di cmdline-nya agar job bisa
+ * dihentikan lewat killBackgroundJob (dipakai tombol Stop terminal streaming).
  */
 function startBackgroundInSandbox(sessionId, command, jobId, options = {}) {
   const containerName = ensureSandbox(sessionId);
@@ -265,7 +267,7 @@ function startBackgroundInSandbox(sessionId, command, jobId, options = {}) {
   if (fs.existsSync(exitPath)) fs.unlinkSync(exitPath);
 
   const niceArgs = options.lowPriority ? ["nice", "-n", "10", "ionice", "-c2", "-n7"] : [];
-  const script = `{ ${command}\n} > /workspace/.bg/${jobId}.log 2>&1; echo $? > /workspace/.bg/${jobId}.exit`;
+  const script = `: #NROZ_BG:${jobId}\n{ ${command}\n} > /workspace/.bg/${jobId}.log 2>&1; echo $? > /workspace/.bg/${jobId}.exit`;
   const child = spawn("docker", ["exec", "-i", "-w", "/workspace", containerName, ...niceArgs, "bash", "-lc", script], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"]
@@ -274,6 +276,38 @@ function startBackgroundInSandbox(sessionId, command, jobId, options = {}) {
   child.unref();
 
   return { logPath, exitPath, jobId };
+}
+
+/**
+ * Menghentikan job background di dalam sandbox: cari proses bash yang cmdline-nya
+ * memuat marker `NROZ_BG:<jobId>` via /proc (pkill/ps tidak selalu terpasang di
+ * container), lalu kill process group-nya — TERM dulu, KILL setelah 2 detik.
+ * Fire-and-forget; dipanggil tombol Stop terminal streaming.
+ */
+function killBackgroundJob(sessionId, jobId) {
+  let containerName;
+  try {
+    containerName = getSafeContainerName(sessionId);
+  } catch (err) {
+    console.warn(`[Sandbox BG] kill ${jobId} gagal menyiapkan container:`, err.message);
+    return false;
+  }
+
+  const killOnce = (signal) =>
+    `pids=$(grep -la 'NROZ_BG:${jobId}' /proc/[0-9]*/cmdline 2>/dev/null | sed 's|/proc/||;s|/cmdline||'); ` +
+    `for p in $pids; do ` +
+    `read -r _ _ _ _ pg _ < /proc/$p/stat 2>/dev/null; ` +
+    `[ -n "$pg" ] && kill -${signal} -- -$pg 2>/dev/null; ` +
+    `kill -${signal} $p 2>/dev/null; done`;
+
+  const script = `${killOnce("TERM")}; sleep 2; ${killOnce("KILL")}`;
+  const child = spawn("docker", ["exec", containerName, "bash", "-c", script], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"]
+  });
+  child.on("error", (err) => console.warn(`[Sandbox BG] kill ${jobId}:`, err.message));
+  child.unref();
+  return true;
 }
 
 function resetSandbox(sessionId) {
@@ -324,6 +358,7 @@ module.exports = {
   execInSandbox,
   execInSandboxAsync,
   startBackgroundInSandbox,
+  killBackgroundJob,
   getSessionWorkspace,
   toSandboxCwd,
   resetSandbox,

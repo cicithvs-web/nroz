@@ -3,7 +3,7 @@
  *
  * Implementasi tiap tool ada di folder tools/:
  *   tools/definitions.js  skema tool (format OpenAI function-calling)
- *   tools/shell.js        run_command, check_command_output, run_code (Docker sandbox)
+ *   tools/shell.js        run_command, check_command_output, wait_command_output, run_code (Docker sandbox)
  *   tools/web.js          web_search, read_url, http_request
  *   tools/files.js        file_read/write/edit/list, send_photo, send_file
  *   tools/media.js        media_download, render_remotion_video, start_web_preview
@@ -75,6 +75,7 @@ async function toolDelegateTask({ role, role_description, task, max_rounds, sess
 const TOOL_HANDLERS = {
   run_command: shell.toolRunCommand,
   check_command_output: shell.toolCheckCommandOutput,
+  wait_command_output: shell.toolWaitCommandOutput,
   run_code: shell.toolRunCode,
   web_search: web.toolWebSearch,
   read_url: web.toolReadUrl,

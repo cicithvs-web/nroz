@@ -16,6 +16,7 @@ const { sendLongMessage, getSendOptions, replyText, sendDraft, stopTyping } = re
 const { handleGeneratedFiles } = require("./fileDelivery");
 const { triggerBackgroundCompaction } = require("./compaction");
 const { ingestChatMessage } = require("./knowledge");
+const { isDraftStreaming } = require("./terminalStream");
 
 // Sesi AI yang sedang berjalan (untuk /stop): sessionId -> { cancelled: boolean }
 const activeTurnSessions = new Map();
@@ -79,6 +80,13 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
   const turnState = { cancelled: false };
   activeTurnSessions.set(sessionId, turnState);
 
+  // Klien Telegram belum semua mendukung beberapa draft bersamaan — selagi draft
+  // terminal aktif di chat ini, draft progres giliran AI ditunda (pesan final tetap terkirim).
+  const draftToChat = (draftId, text, threadId) => {
+    if (!isDraftStreaming(chatId)) return sendDraft(chatId, draftId, text, threadId);
+    return Promise.resolve();
+  };
+
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Cek apakah user mengirim perintah /stop atau /cancel di tengah jalan
@@ -136,7 +144,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
                 const preview = cleanDraftPreview(assistantContent).trim();
                 if (preview) {
                   const previewText = preview.length > 4000 ? preview.slice(-4000) : preview;
-                  await sendDraft(chatId, draftId, previewText, msg.message_thread_id);
+                  await draftToChat(draftId, previewText, msg.message_thread_id);
                 }
               }
             }
@@ -214,7 +222,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
           const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
             ? `Sedang ${langkah}...`
             : `Sedang melakukan ${langkah}...`;
-          await sendDraft(chatId, turnDraftId, actionText, msg.message_thread_id);
+          await draftToChat(turnDraftId, actionText, msg.message_thread_id);
         }
 
         console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
@@ -231,8 +239,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
           },
           onSubagentProgress: async ({ role, tool, args }) => {
             if (isPrivate) {
-              await sendDraft(
-                chatId,
+              await draftToChat(
                 turnDraftId,
                 `Subagent (${role}): sedang ${describeToolCall(tool, args)}...`,
                 msg.message_thread_id
@@ -249,7 +256,7 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
         if (isPrivate) {
           const prefix = ok ? "Selesai: " : "Gagal: ";
           const draftDetail = ringkas ? `${prefix}${langkah} (${ringkas.slice(0, 70)})` : `${prefix}${langkah}...`;
-          await sendDraft(chatId, turnDraftId, draftDetail, msg.message_thread_id);
+          await draftToChat(turnDraftId, draftDetail, msg.message_thread_id);
         }
 
         currentMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });

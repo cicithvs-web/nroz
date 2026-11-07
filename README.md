@@ -96,6 +96,17 @@ Bot Telegram AI Agent canggih dengan arsitektur **Tool-Calling**, **Persistent D
     - Agent menulis kode Remotion mengikuti spec tersebut; hasil analisis bisa disimpan sebagai preset
       gaya via `save_skill` agar bisa dipakai ulang tanpa kirim referensi lagi.
 
+13. **🖥️ Terminal Streaming (`bot/terminalStream.js`)**:
+    - Setiap `run_command {background: true}` kini ditampilkan live: di chat pribadi memakai draft
+      streaming native Telegram (`sendMessageDraft`, Bot API 9.3+ — bubble live nempel di bawah chat,
+      otomatis bersih saat pesan final terkirim) dengan tombol stop generation native (`can_stop`,
+      Bot API 10.3); di grup memakai satu pesan yang diedit berkala + tombol ⏹ Stop dan 📄 Log lengkap.
+    - Watcher berbasis offset membaca `.bg/<jobId>.log` lewat bind mount (tanpa perubahan di sandbox),
+      strip ANSI, dan menghormati rate limit draft Telegram (20 panggilan/5 dtk, 40/30 dtk per peer).
+    - Tool baru `wait_command_output`: agent menunggu job selesai dalam SATU panggilan — menggantikan
+      poling `check_command_output` berulang yang memakan ronde tool dan token. Matikan stream via
+      `TERMINAL_STREAM=off`, tombol stop native via `TERMINAL_STREAM_STOP=off`.
+
 ---
 
 ## 📁 Struktur Proyek

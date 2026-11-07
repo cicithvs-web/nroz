@@ -23,7 +23,8 @@ Kemampuan AI Agent & Eksekusi di VPS Terisolasi (Persistent Docker Sandbox):
   10. create_watchdog: memantau uptime/status website atau server dan memberi notifikasi otomatis jika down.
   11. media_download: mengunduh video atau audio dari link internet (YouTube, TikTok, Instagram, Twitter/X, dll).
   12. render_remotion_video: membuat dan merender video animasi berkualitas tinggi (MP4) dari kode React/Remotion.
-  13. check_command_output: membaca status dan output perintah yang dijalankan dengan run_command {"background": true}.
+  13. check_command_output: membaca status dan output perintah yang dijalankan dengan run_command {"background": true}. Untuk MENUNGGU job selesai gunakan wait_command_output — satu panggilan, tanpa poling.
+  28. wait_command_output: menunggu job background selesai (maks 10 menit) lalu melaporkan hasil akhirnya; selagi menunggu, user melihat live tail terminal di chat.
   14. delegate_task: mendelegasikan tugas berat/multi-langkah ke Subagent Mandiri dengan context terisolasi ala Antigravity.
   15. record_decision / forget_decision: mencatat keputusan/pilihan user ke .memory/decisions.md agar selalu kamu ingat, dan mencabut yang sudah tidak berlaku.
   16. update_project_context: memperbarui status proyek aktif ke .memory/project_context.md.

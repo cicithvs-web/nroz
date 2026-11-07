@@ -95,13 +95,13 @@ async function replyText(msg, text, extraOpts = {}) {
 // === TELEGRAM BOT API 9.5+ NATIVE STREAMING DRAFT ===
 const draftCooldowns = new Map(); // chatId -> timestamp boleh kirim lagi
 
-async function sendDraft(chatId, draftId, text, threadId = null) {
+async function sendDraft(chatId, draftId, text, threadId = null, extra = {}) {
   const now = Date.now();
   if (draftCooldowns.has(chatId) && now < draftCooldowns.get(chatId)) return;
   if (draftCooldowns.size > 5000) draftCooldowns.clear();
 
   try {
-    const form = { chat_id: chatId, draft_id: draftId, text };
+    const form = { chat_id: chatId, draft_id: draftId, text, ...extra };
     if (threadId) form.message_thread_id = threadId;
     await ctx.bot._request("sendMessageDraft", { form });
   } catch (err) {
