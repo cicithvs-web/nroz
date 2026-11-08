@@ -102,8 +102,15 @@ Format Tabel & Respon:
 }
 
 function buildMessagesWithSystem(historyMessages, sessionId = null) {
-  let systemContent = getBaseSystemPrompt(sessionId);
-  // Model perlu tahu "sekarang" untuk mengisi create_reminder.at dari permintaan seperti "besok jam 8".
+  // ── System Prompt STATIS ─────────────────────────────────────────
+  // Konten ini tidak berubah antar pesan, sehingga server AI (OpenAI,
+  // Claude, Gemini) dapat meng-cache prefix token-nya secara otomatis.
+  // Jangan menyisipkan nilai dinamis (jam, tanggal, memori) di sini!
+  const systemContent = getBaseSystemPrompt(sessionId);
+
+  // ── Konteks Dinamis (waktu + memori proyek) ──────────────────────
+  // Dipisahkan ke pesan system kedua agar tidak merusak prefix cache
+  // system prompt utama. Model tetap melihat kedua pesan system ini.
   const now = new Date().toLocaleString("id-ID", {
     timeZone: "Asia/Jakarta",
     weekday: "long",
@@ -113,15 +120,17 @@ function buildMessagesWithSystem(historyMessages, sessionId = null) {
     hour: "2-digit",
     minute: "2-digit"
   });
-  systemContent += `\n\nWaktu sekarang: ${now} WIB (Asia/Jakarta).`;
+  const contextParts = [`Waktu sekarang: ${now} WIB (Asia/Jakarta).`];
   if (sessionId) {
     const memoryInject = getInjectedMemoryContext(sessionId);
     if (memoryInject) {
-      systemContent += `\n\n=== MEMORI PROYEK & KEPUTUSAN TERKINI ===\n${memoryInject}`;
+      contextParts.push(`=== MEMORI PROYEK & KEPUTUSAN TERKINI ===\n${memoryInject}`);
     }
   }
+
   return [
-    { role: "system", content: systemContent },
+    { role: "system", content: systemContent },       // STATIS → ter-cache!
+    { role: "system", content: contextParts.join("\n\n") }, // Dinamis, kecil (~30 token)
     ...historyMessages
   ];
 }
