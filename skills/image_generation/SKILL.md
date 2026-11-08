@@ -35,3 +35,8 @@ Setiap permintaan gambar WAJIB diselesaikan dalam 2 langkah terstruktur:
 ## Tips Menggambar dengan Pillow (PIL)
 - Siapkan ukuran kanvas yang cukup besar (misal 1024x1024 atau 1200x800).
 - Gunakan antialiasing, gradien warna bertingkat, dan lapisan bayangan (shadow) menggunakan `ImageFilter.GaussianBlur` agar hasil gambar terlihat profesional dan tidak kaku.
+
+## Gambar 3D Photorealistic (Blender)
+- Jika user meminta gambar 3D realistis (material kaca, logam, refleksi cahaya nyata, bayangan lembut), gunakan **Blender headless** di sandbox.
+- Baca panduan lengkap dengan `read_skill({ name: "blender_3d" })` sebelum menulis script Blender.
+- Alur: tulis script Python `bpy` → jalankan `blender -b -P script.py` via `run_command` → kirim via `send_photo`.

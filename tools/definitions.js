@@ -101,6 +101,7 @@ const TOOL_DEFINITIONS = [
         "Mendukung JavaScript (Node.js), Python 3, dan Bash. " +
         "Timeout 90 detik; kode yang lebih panjang jalankan lewat run_command dengan file + background:true. " +
         "Kode dieksekusi di dalam sandbox Docker, jadi folder kerja hanya terlihat sebagai /workspace. " +
+        "BLENDER 3D: sandbox memiliki Blender headless — untuk gambar 3D photorealistic, tulis script Python bpy dan jalankan via run_command: 'blender -b -P /workspace/script.py'. Baca skill 'blender_3d' untuk panduan. " +
         "PERINGATAN: DILARANG menggunakan tool ini untuk membuat/merender video animasi (ffmpeg/moviepy/manim/opencv) " +
         "atau membuat klip TTS/audio per segmen. Untuk video bernarasi, gunakan SATU panggilan 'render_remotion_video' " +
         "dengan tts_text (naskah utuh) atau tts_lines (banyak suara).",
@@ -436,6 +437,7 @@ const TOOL_DEFINITIONS = [
       description:
         "Membuat dan merender video animasi berkualitas tinggi (MP4) secara terprogram dari kode React/TypeScript menggunakan Remotion. " +
         "Mendukung animasi hook Remotion (useCurrentFrame, interpolate, spring, useVideoConfig, AbsoluteFill, Sequence), teks dinamis, bentuk, warna, dan styling CSS flexbox. " +
+        "DUKUNGAN 3D: bisa menggunakan Three.js via @remotion/three (ThreeCanvas), @react-three/fiber, @react-three/drei untuk video 3D (objek berputar, material PBR, pencahayaan sinematik, animasi produk). Baca skill 'threejs_3d' untuk panduan lengkap. " +
         "VIDEO PANJANG / BERNARASI: cukup SATU panggilan — kirim seluruh naskah lewat tts_text (atau tts_lines untuk banyak suara). " +
         "Durasi video otomatis mengikuti panjang voiceover sampai 900 detik, dan render dikerjakan di antrean latar belakang. " +
         "Dilarang membuat klip TTS/audio/video per segmen memakai run_command/run_code lalu menggabungkannya sendiri. " +
@@ -729,7 +731,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "read_skill",
       description:
-        "Membaca panduan teknis mendalam dan SOP operasional dari katalog skill untuk keahlian tertentu (contoh: 'remotion_video', 'image_generation', 'subagent_orchestration', 'web_preview'). Gunakan tool ini sebelum memulai tugas yang relevan agar eksekusimu presisi.",
+        "Membaca panduan teknis mendalam dan SOP operasional dari katalog skill untuk keahlian tertentu (contoh: 'remotion_video', 'image_generation', 'threejs_3d', 'blender_3d', 'subagent_orchestration', 'web_preview'). Gunakan tool ini sebelum memulai tugas yang relevan agar eksekusimu presisi.",
       parameters: {
         type: "object",
         properties: {

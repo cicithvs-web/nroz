@@ -50,6 +50,11 @@ Skill ini digunakan setiap kali user meminta membuat, merancang, atau merender v
 - Desain modern: latar belakang gelap gradien estetik, typography besar kontras tinggi, tata letak rapi, elemen visual pendukung yang dinamis.
 - Resolusi standar: `1080x1920` (9:16 vertikal untuk Shorts/Reels/TikTok) atau `1920x1080` (16:9 lanskap).
 
+## Dukungan 3D (Three.js / React Three Fiber)
+- Untuk video 3D (objek berputar, animasi produk, geometri futuristik), gunakan library `@remotion/three`, `three`, `@react-three/fiber`, `@react-three/drei` yang sudah terinstall.
+- Gunakan `<ThreeCanvas>` dari `@remotion/three` (BUKAN `<Canvas>` dari R3F). Animasi HARUS berbasis `useCurrentFrame()` dari Remotion.
+- Baca panduan lengkap dengan `read_skill({ name: "threejs_3d" })` sebelum menulis kode 3D.
+
 ## Video Referensi ("bikin seperti ini")
 - Saat user melampirkan video referensi (upload ≤20 MB otomatis disimpan ke
   `uploads/`, atau kirim link lalu unduh dengan `media_download`) dan meminta gaya

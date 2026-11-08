@@ -122,7 +122,7 @@ function ensureSandbox(sessionId) {
         `docker run -d ` +
         `--name ${containerName} ` +
         `--restart unless-stopped ` +
-        `--memory 1024m ` +
+        `--memory 2048m ` +
         `--cpus 2.0 ` +
         `-v "${hostWorkspace}:/workspace" ` +
         `-w /workspace ` +

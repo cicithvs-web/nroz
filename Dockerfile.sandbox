@@ -2,6 +2,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ── Base tools + Python + Node ──────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -14,12 +15,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     python3-matplotlib \
+    python3-numpy \
     nodejs \
     npm \
     build-essential \
     jq \
     iputils-ping \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Blender (headless 3D rendering with Cycles ray-tracing) ────────
+# Download official portable Blender binary (self-contained, no X11 needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xz-utils \
+    libxi6 \
+    libxxf86vm1 \
+    libxfixes3 \
+    libxrender1 \
+    libgl1 \
+    libegl1 \
+    libxkbcommon0 \
+    libsm6 \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/* \
+    && BLENDER_VERSION="4.2.0" \
+    && BLENDER_URL="https://download.blender.org/release/Blender4.2/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+    && wget -q "${BLENDER_URL}" -O /tmp/blender.tar.xz \
+    && mkdir -p /opt/blender \
+    && tar xf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 \
+    && ln -s /opt/blender/blender /usr/local/bin/blender \
+    && rm /tmp/blender.tar.xz
+
+# ── Pillow for image generation ────────────────────────────────────
+RUN pip3 install --no-cache-dir --break-system-packages Pillow
 
 WORKDIR /workspace
 
