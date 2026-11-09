@@ -12,6 +12,7 @@ const { Client } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/cl
 const { StdioClientTransport } = require("./node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js");
 const { resolveInWorkspace } = require("./lib/pathGuard");
 const { fixMcpArgs, describeArgsShape } = require("./lib/mcpArgs");
+const { toSandboxPath } = require("./tools/common");
 
 const CONFIG_PATH = path.join(__dirname, "mcp_servers.json");
 
@@ -214,9 +215,9 @@ async function callMcpTool(name, args = {}, context = {}) {
       }
     }
 
-    // Betulkan kesalahan argumen yang sudah dikenal (mis. revisesThought: 0) sebelum dikirim,
+    // Betulkan kesalahan argumen yang sudah dikenal (mis. revisesThought: 0, path browser) sebelum dikirim,
     // supaya model tidak membuang satu langkah untuk mengulang panggilan.
-    const { args: callArgs, fixes } = fixMcpArgs(originalName, cleanArgs);
+    const { args: callArgs, fixes } = fixMcpArgs(originalName, cleanArgs, context);
     if (fixes.length) console.log(`[MCP] Argumen '${name}' dibetulkan: ${fixes.join("; ")}`);
 
     // Kalau proses MCP mati (crash/OOM), sambung ulang sekali lalu ulangi panggilannya.
@@ -293,6 +294,10 @@ async function callMcpTool(name, args = {}, context = {}) {
 
     if (!textOutput) {
       textOutput = result.isError ? "❌ Operasi MCP selesai dengan error tanpa pesan teks." : "✅ Operasi MCP berhasil diselesaikan.";
+    }
+
+    if (textOutput && context.sessionId) {
+      textOutput = toSandboxPath(textOutput, context.sessionId);
     }
 
     return textOutput;

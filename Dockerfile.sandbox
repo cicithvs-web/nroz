@@ -16,11 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-matplotlib \
     python3-numpy \
-    nodejs \
-    npm \
     build-essential \
     jq \
     iputils-ping \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Blender (headless 3D rendering with Cycles ray-tracing) ────────

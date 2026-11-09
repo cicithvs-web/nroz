@@ -122,6 +122,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   check "node_modules bot" "[ -d node_modules ]" "npm install"
   check "node_modules remotion-engine" "[ -d remotion-engine/node_modules ]" "cd remotion-engine && npm install"
   check "Chrome Headless Shell (Remotion)" "[ -d remotion-engine/node_modules/.remotion/chrome-headless-shell ]" "cd remotion-engine && npx remotion browser ensure"
+  check "Browser MCP (Playwright)" "[ -f /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome ]" "npx -y @playwright/mcp@0.0.83 install-browser --with-deps chrome-for-testing"
   check "venv TTS (/opt/voice-env)" "[ -x /opt/voice-env/bin/edge-tts ]" "dibuat otomatis saat TTS pertama dipakai"
   check "image sandbox Docker" "docker image inspect nroz-sandbox:latest" "docker build -f Dockerfile.sandbox -t nroz-sandbox:latest ."
   check "swap aktif" "[ \"\$(awk '/^SwapTotal/ {print \$2}' /proc/meminfo)\" -gt 102400 ]" "bash scripts/setup-vps.sh --swap-mb=4096"
@@ -243,6 +244,8 @@ if [ "$INSTALL_NPM" -eq 1 ]; then
   npm install --no-fund --no-audit
   say "npm install (remotion-engine) + unduh Chrome Headless Shell"
   (cd remotion-engine && npm install --no-fund --no-audit && npx remotion browser ensure)
+  say "Unduh browser Playwright untuk MCP"
+  npx -y @playwright/mcp@0.0.83 install-browser --with-deps chrome-for-testing
 fi
 
 # ---------------------------------------------------------------- postgres
@@ -301,8 +304,9 @@ if grep -qE '^DATABASE_URL=.*@(localhost|127\.0\.0\.1)' .env; then
 fi
 
 # ---------------------------------------------------------------- voice env
-say "Menyiapkan venv edge-tts (/opt/voice-env)"
+say "Menyiapkan venv edge-tts dan Whisper (/opt/voice-env)"
 node -e "require('./ttsManager').ensureVoiceEnv().then(()=>console.log('  voice-env siap')).catch(e=>{console.warn('  voice-env belum siap:', e.message)})"
+[ -x /opt/voice-env/bin/pip ] && /opt/voice-env/bin/pip install --quiet faster-whisper
 
 # ---------------------------------------------------------------- sandbox image
 if docker image inspect nroz-sandbox:latest >/dev/null 2>&1; then

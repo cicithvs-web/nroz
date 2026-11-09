@@ -66,3 +66,21 @@ test("describeArgsShape tidak membocorkan isi", () => {
   assert.deepEqual(shape, { thought: "string(14)", revisesThought: "number(0)", n: "null", tags: "array(2)", o: "object", flag: "boolean(true)" });
   assert.ok(!describeArgsShape({ thought: "rahasia banget" }).includes("rahasia"));
 });
+
+test("browser: filename dan paths dialihkan ke workspace sesi (Opsi 2)", () => {
+  const ctx = { sessionId: "user123" };
+  const ss = fixMcpArgs("browser_take_screenshot", { filename: "artifacts/test.png", scale: "css" }, ctx);
+  assert.ok(ss.args.filename.endsWith("/workspace/user123/artifacts/test.png"));
+  assert.equal(ss.args.scale, "css");
+  assert.equal(ss.fixes.length, 1);
+
+  const snap = fixMcpArgs("browser_snapshot", { filename: "mail-page.yml" }, ctx);
+  assert.ok(snap.args.filename.endsWith("/workspace/user123/mail-page.yml"));
+
+  const empty = fixMcpArgs("browser_take_screenshot", { filename: "", scale: "css" }, ctx);
+  assert.equal("filename" in empty.args, false);
+
+  const upload = fixMcpArgs("browser_file_upload", { paths: ["uploads/doc.pdf", "/workspace/uploads/pic.png"] }, ctx);
+  assert.ok(upload.args.paths[0].endsWith("/workspace/user123/uploads/doc.pdf"));
+  assert.ok(upload.args.paths[1].endsWith("/workspace/user123/uploads/pic.png"));
+});
