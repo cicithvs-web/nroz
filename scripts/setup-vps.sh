@@ -155,7 +155,8 @@ fi
 say "Memasang ffmpeg, ffprobe, yt-dlp, python3-venv, python3-pip"
 apt_ensure_update
 apt-get install -y -qq ffmpeg python3-venv python3-pip rsync
-command -v yt-dlp >/dev/null || apt-get install -y -qq yt-dlp || pip3 install --break-system-packages yt-dlp
+command -v yt-dlp >/dev/null || apt-get install -t trixie-backports -y -qq yt-dlp || apt-get install -y -qq yt-dlp || pip3 install --break-system-packages yt-dlp
+pip3 install --break-system-packages -q curl-cffi 2>/dev/null || true
 
 # ---------------------------------------------------------------- library chrome
 # Debian 13 menamai paketnya dengan sufiks t64, Ubuntu 22.04/24.04 tidak. Diambil
@@ -278,13 +279,13 @@ else
     docker compose up -d postgres
   else
     # Fallback tanpa plugin compose: definisi yang sama seperti docker-compose.yml.
-    docker pull postgres:16-alpine
+    docker pull pgvector/pgvector:pg16
     docker rm -f nroz-postgres >/dev/null 2>&1 || true
     PG_PASS="$(grep -E '^POSTGRES_PASSWORD=' .env | head -1 | cut -d= -f2-)"
     docker create --name nroz-postgres --restart unless-stopped \
       -e POSTGRES_DB=nroz -e POSTGRES_USER=nroz -e "POSTGRES_PASSWORD=${PG_PASS}" \
       -v nroz-pg-data:/var/lib/postgresql/data -p 127.0.0.1:5432:5432 \
-      postgres:16-alpine >/dev/null
+      pgvector/pgvector:pg16 >/dev/null
     docker start nroz-postgres >/dev/null
   fi
 fi

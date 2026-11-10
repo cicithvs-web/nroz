@@ -8,9 +8,19 @@ const { getRenderQueueStatus } = require("../remotionManager.js");
 const { startTerminalStream } = require("../bot/terminalStream.js");
 const { truncate, toSandboxPath, exitCodeOf, toHostPathPreview, tailFile } = require("./common");
 
-/** Job run_command yang jalan di latar belakang: id -> { logPath, exitPath, startedAt, command } */
+/** Job run_command yang jalan di latar belakang: id -> { sessionId, logPath, exitPath, startedAt, command } */
 const backgroundJobs = new Map();
 let bgCounter = 0;
+const BG_JOB_TTL_MS = 6 * 3600 * 1000; // Bersihkan job selesai yang lebih tua dari 6 jam
+
+function pruneBackgroundJobs() {
+  const now = Date.now();
+  for (const [id, job] of backgroundJobs.entries()) {
+    if (now - job.startedAt > BG_JOB_TTL_MS && fs.existsSync(job.exitPath)) {
+      backgroundJobs.delete(id);
+    }
+  }
+}
 
 /** Perintah yang menyita CPU penuh — diberi prioritas rendah selama video sedang dirender. */
 const HEAVY_RENDER_RE = /(npx\s+remotion|remotion\s+render|render\.mjs|moviepy|manim|blender|headless[-_]shell|chrome-headless|ffmpeg\b.*(-c:v|libx264|libx265|--preset)|encod(e|ing))/i;
@@ -43,13 +53,15 @@ async function toolRunCommand({ command, cwd, sessionId, background, chatId, thr
     : "";
 
   if (background) {
+    pruneBackgroundJobs();
+    const sid = String(sessionId || "default");
     const jobId = `bg${++bgCounter}`;
     try {
-      const { logPath, exitPath } = startBackgroundInSandbox(sessionId || "default", sandboxCommand, jobId, { lowPriority });
-      backgroundJobs.set(jobId, { logPath, exitPath, startedAt: Date.now(), command: toHostPathPreview(command) });
+      const { logPath, exitPath } = startBackgroundInSandbox(sid, sandboxCommand, jobId, { lowPriority });
+      backgroundJobs.set(jobId, { sessionId: sid, logPath, exitPath, startedAt: Date.now(), command: toHostPathPreview(command) });
       // Live tail: chat pribadi = draft streaming native, grup = pesan yang diedit berkala.
       startTerminalStream(jobId, {
-        sessionId: sessionId || "default",
+        sessionId: sid,
         chatId,
         threadId,
         logPath,
@@ -97,7 +109,11 @@ async function toolRunCommand({ command, cwd, sessionId, background, chatId, thr
  * Tool: check_command_output
  * Membaca status/output job run_command yang jalan di latar belakang.
  */
-async function toolCheckCommandOutput({ job_id }) {
+async function toolCheckCommandOutput({ job_id, sessionId }) {
+  pruneBackgroundJobs();
+  const sid = String(sessionId || "default");
+  const sessionJobs = [...backgroundJobs.entries()].filter(([, j]) => j.sessionId === sid);
+
   const summarize = (id, job) => {
     const done = fs.existsSync(job.exitPath);
     const code = done ? tailFile(job.exitPath, 16).trim() : null;
@@ -106,13 +122,13 @@ async function toolCheckCommandOutput({ job_id }) {
   };
 
   if (!job_id) {
-    if (backgroundJobs.size === 0) return "Tidak ada job background yang pernah dijalankan di proses ini.";
-    return `Job background aktif:\n${[...backgroundJobs.entries()].map(([id, j]) => summarize(id, j)).join("\n")}`;
+    if (sessionJobs.length === 0) return "Tidak ada job background yang pernah dijalankan di sesi ini.";
+    return `Job background aktif:\n${sessionJobs.map(([id, j]) => summarize(id, j)).join("\n")}`;
   }
 
   const job = backgroundJobs.get(String(job_id));
-  if (!job) {
-    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${[...backgroundJobs.keys()].join(", ") || "(kosong)"}`;
+  if (!job || job.sessionId !== sid) {
+    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${sessionJobs.map(([id]) => id).join(", ") || "(kosong)"}`;
   }
 
   const finished = fs.existsSync(job.exitPath);
@@ -137,10 +153,13 @@ async function toolCheckCommandOutput({ job_id }) {
  * Satu panggilan menggantikan poling check_command_output berulang-ulang yang memakan
  * ronde tool dan token. Selagi menunggu, user melihat live tail terminal di chat.
  */
-async function toolWaitCommandOutput({ job_id, timeout_seconds }) {
+async function toolWaitCommandOutput({ job_id, timeout_seconds, sessionId }) {
+  pruneBackgroundJobs();
+  const sid = String(sessionId || "default");
+  const sessionJobs = [...backgroundJobs.entries()].filter(([, j]) => j.sessionId === sid);
   const job = backgroundJobs.get(String(job_id));
-  if (!job) {
-    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${[...backgroundJobs.keys()].join(", ") || "(kosong)"}`;
+  if (!job || job.sessionId !== sid) {
+    return `❌ Job '${job_id}' tidak ditemukan. Job yang dikenal: ${sessionJobs.map(([id]) => id).join(", ") || "(kosong)"}`;
   }
 
   const timeoutMs = Math.min(Math.max(Number(timeout_seconds) || 600, 5), 600) * 1000;
@@ -155,7 +174,7 @@ async function toolWaitCommandOutput({ job_id, timeout_seconds }) {
       `Panggil lagi wait_command_output dengan timeout lebih panjang, atau cek sekilas lewat check_command_output.`
     );
   }
-  return toolCheckCommandOutput({ job_id });
+  return toolCheckCommandOutput({ job_id, sessionId: sid });
 }
 
 /**

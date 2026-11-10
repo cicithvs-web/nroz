@@ -108,6 +108,65 @@ function isConnectionError(err) {
   );
 }
 
+/**
+ * Vision-in-the-Loop: menganalisis screenshot browser secara visual menggunakan model aktif
+ * agar AI dapat melihat sendiri hasil UI web (layout, kontras, elemen rusak/error) dan memperbaikinya.
+ */
+async function analyzeScreenshotWithVision(base64Data, mimeType = "image/png", context = {}, args = {}) {
+  if (!base64Data || args?.analyze_visual === false) return null;
+  let activeClient = context.client || null;
+  let activeModel = context.model || null;
+
+  if (!activeClient || !activeModel) {
+    try {
+      const { getClient, getConfig } = require("./bot/config");
+      activeClient = activeClient || getClient();
+      activeModel = activeModel || getConfig()?.model;
+    } catch (_) {}
+  }
+  if (!activeClient || !activeModel) return null;
+
+  const cleanMime = mimeType && mimeType.startsWith("image/") ? mimeType : "image/png";
+  const focusHint =
+    args?.visual_focus || args?.prompt
+      ? `\nFokus pemeriksaan khusus: ${String(args.visual_focus || args.prompt).trim()}`
+      : "";
+  const promptText =
+    "Analisis screenshot tampilan layar web ini secara ringkas dan objektif (maks 5 poin):\n" +
+    "1. Status halaman (apakah tampil utuh, kosong/blank, atau ada pesan error).\n" +
+    "2. Kondisi layout, keselarasan elemen, proporsi, dan keterbacaan teks/kontras warna.\n" +
+    "3. Deteksi bug visual (elemen bertumpuk, terpotong, overflow, atau gambar rusak).\n" +
+    "4. Rekomendasi spesifik perbaikan CSS/HTML jika ditemukan kekurangan tampilan." +
+    focusHint;
+
+  try {
+    const res = await activeClient.chat.completions.create(
+      {
+        model: activeModel,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: promptText },
+              {
+                type: "image_url",
+                image_url: { url: `data:${cleanMime};base64,${base64Data}` }
+              }
+            ]
+          }
+        ],
+        stream: false
+      },
+      { timeout: 20_000, maxRetries: 0 }
+    );
+    const analysis = res?.choices?.[0]?.message?.content?.trim();
+    return analysis || null;
+  } catch (err) {
+    console.warn(`[MCP Vision] Analisis visual screenshot dilewati (${err.message})`);
+    return null;
+  }
+}
+
 function registerServerTools(serverName, serverCfg, tools) {
   for (const t of tools) {
     // Standarisasi nama tool
@@ -255,7 +314,8 @@ async function callMcpTool(name, args = {}, context = {}) {
 
           const imgBuffer = Buffer.from(part.data, "base64");
           fs.writeFileSync(filePath, imgBuffer);
-          savedImages.push({ filePath, fileName });
+          const visionNote = await analyzeScreenshotWithVision(part.data, part.mimeType, context, cleanArgs);
+          savedImages.push({ filePath, fileName, visionNote });
 
           // Otomatis kirim ke Telegram jika context bot & chatId tersedia!
           if (context.bot && context.chatId) {
@@ -279,8 +339,11 @@ async function callMcpTool(name, args = {}, context = {}) {
 
     if (savedImages.length > 0) {
       const imgNote = savedImages
-        .map((img) => `📸 [Screenshot berhasil disimpan di /workspace/artifacts/${img.fileName} dan dikirim ke Telegram]`)
-        .join("\n");
+        .map((img) => {
+          const base = `📸 [Screenshot berhasil disimpan di /workspace/artifacts/${img.fileName} dan dikirim ke Telegram]`;
+          return img.visionNote ? `${base}\n\n👁️ [Analisis Visual UI Otomatis]:\n${img.visionNote}` : base;
+        })
+        .join("\n\n");
       textOutput = (textOutput ? textOutput + "\n\n" : "") + imgNote;
     }
 
@@ -341,6 +404,7 @@ module.exports = {
   getMcpToolDefinitions,
   hasMcpTool,
   callMcpTool,
+  analyzeScreenshotWithVision,
   closeAllMcp,
   getMcpStatus
 };

@@ -58,22 +58,27 @@ async function toolCreateReminder({ message, minutes_from_now, at, repeat, timez
 /**
  * Tool: create_watchdog
  */
-async function toolCreateWatchdog({ url, interval_minutes, sessionId, chatId, threadId }) {
+async function toolCreateWatchdog({ url, interval_minutes, auto_heal_task, sessionId, chatId, threadId }) {
   if (!url) return "❌ 'url' wajib diisi.";
   const interval = Number(interval_minutes) || 10;
+  let w;
   try {
-    await scheduler.addWatchdog({
+    w = await scheduler.addWatchdog({
       sessionId: sessionId || "default",
       chatId: chatId ?? scheduler.splitSessionId(sessionId || "default").chatId,
       threadId: threadId ?? null,
       url,
-      intervalMinutes: interval
+      intervalMinutes: interval,
+      autoHealTask: auto_heal_task || null
     });
   } catch (err) {
     if (err instanceof BlockedUrlError) return `⛔ ${err.message}`;
     return `❌ Gagal memasang watchdog: ${err.message}`;
   }
-  return `🚨 Watchdog pemantau server aktif untuk: ${url}\n• Interval pengecekan: Setiap ${interval} menit.\nBot akan otomatis mengirimkan peringatan di Telegram jika website down/error.`;
+  const healInfo = w.autoHealTask
+    ? `\n• Mode Self-Healing: AKTIF — jika down, Agent otomatis bangun & mengeksekusi: "${w.autoHealTask}"`
+    : `\n• Mode: Notifikasi peringatan Telegram saat website down/pulih.`;
+  return `🚨 Watchdog pemantau server aktif untuk: ${url}\n• Interval pengecekan: Setiap ${interval} menit.${healInfo}`;
 }
 
 /**

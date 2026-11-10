@@ -7,8 +7,206 @@
 
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const { getSessionWorkspace } = require("../sandboxManager.js");
 const { truncate, toSandboxPath, resolveFilePath, isSensitiveFile } = require("./common");
+
+/**
+ * Instant Syntax Linter otomatis setelah file_write atau file_edit.
+ * Mengembalikan string kosong jika valid, atau pesan peringatan baris error jika ada kesalahan sintaks.
+ */
+function checkFileSyntax(resolvedPath, content) {
+  const ext = path.extname(resolvedPath).toLowerCase();
+  if (!ext) return "";
+
+  if (ext === ".json") {
+    try {
+      JSON.parse(content);
+      return "";
+    } catch (err) {
+      return `\n⚠️ [Peringatan Sintaks JSON — segera perbaiki dengan file_edit]: ${err.message}`;
+    }
+  }
+
+  if (ext === ".js" || ext === ".cjs" || ext === ".mjs") {
+    try {
+      execFileSync(process.execPath, ["--check", resolvedPath], {
+        timeout: 3000,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      return "";
+    } catch (err) {
+      const stderr = (err.stderr ? err.stderr.toString() : err.message || "").trim();
+      const shortErr = stderr.split("\n").slice(0, 5).join("\n");
+      return `\n⚠️ [Peringatan Sintaks JS — segera perbaiki dengan file_edit]:\n${shortErr}`;
+    }
+  }
+
+  if (ext === ".sh" || ext === ".bash") {
+    try {
+      execFileSync("bash", ["-n", resolvedPath], {
+        timeout: 3000,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      return "";
+    } catch (err) {
+      const stderr = (err.stderr ? err.stderr.toString() : err.message || "").trim();
+      const shortErr = stderr.split("\n").slice(0, 4).join("\n");
+      return `\n⚠️ [Peringatan Sintaks Bash — segera perbaiki dengan file_edit]:\n${shortErr}`;
+    }
+  }
+
+  if (ext === ".py") {
+    try {
+      execFileSync(
+        "python3",
+        ["-c", "import ast, sys; ast.parse(open(sys.argv[1], 'rb').read(), sys.argv[1])", resolvedPath],
+        { timeout: 3000, stdio: ["ignore", "pipe", "pipe"] }
+      );
+      return "";
+    } catch (err) {
+      if (err.code === "ENOENT") return "";
+      const stderr = (err.stderr ? err.stderr.toString() : err.message || "").trim();
+      const shortErr = stderr.split("\n").slice(-3).join("\n");
+      return `\n⚠️ [Peringatan Sintaks Python — segera perbaiki dengan file_edit]:\n${shortErr}`;
+    }
+  }
+
+  return "";
+}
+
+/** Riwayat snapshot file per sesi untuk fitur workspace_undo (maks 25 snapshot / sesi, <= 1 MB per file). */
+const fileUndoStacks = new Map();
+const MAX_UNDO_PER_SESSION = 25;
+const MAX_SNAPSHOT_BYTES = 1024 * 1024;
+let undoCounter = 0;
+
+function recordFileSnapshot(sessionId, resolvedPath, op) {
+  try {
+    const sid = String(sessionId || "default");
+    const existed = fs.existsSync(resolvedPath);
+    let prevContent = null;
+    if (existed) {
+      const st = fs.statSync(resolvedPath);
+      if (!st.isFile() || st.size > MAX_SNAPSHOT_BYTES) return;
+      prevContent = fs.readFileSync(resolvedPath, "utf-8");
+    }
+    if (!fileUndoStacks.has(sid)) fileUndoStacks.set(sid, []);
+    const stack = fileUndoStacks.get(sid);
+    stack.push({
+      id: `undo_${++undoCounter}`,
+      ts: Date.now(),
+      op,
+      resolvedPath,
+      sandboxPath: toSandboxPath(resolvedPath, sid),
+      existed,
+      prevContent
+    });
+    if (stack.length > MAX_UNDO_PER_SESSION) {
+      stack.splice(0, stack.length - MAX_UNDO_PER_SESSION);
+    }
+  } catch (_) {}
+}
+
+/**
+ * Pencocokan baris dengan toleransi indentasi/spasi tepi (Fuzzy Line Match).
+ * Hanya diterima jika ditemukan TEPAT 1 lokasi unik di dalam file.
+ */
+function fuzzyLineReplace(content, target, replacement) {
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const contentLines = content.replace(/\r\n/g, "\n").split("\n");
+  const targetLines = target.replace(/\r\n/g, "\n").split("\n");
+  const replacementLines = replacement.replace(/\r\n/g, "\n").split("\n");
+
+  const m = targetLines.length;
+  if (m === 0 || targetLines.every((l) => l.trim() === "")) {
+    return { ok: false, reason: "not_found" };
+  }
+  if (m > contentLines.length) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const trimmedTarget = targetLines.map((l) => l.trim());
+  const matches = [];
+
+  for (let i = 0; i <= contentLines.length - m; i++) {
+    let allMatch = true;
+    for (let k = 0; k < m; k++) {
+      if (contentLines[i + k].trim() !== trimmedTarget[k]) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) matches.push(i);
+  }
+
+  if (matches.length === 0) return { ok: false, reason: "not_found" };
+  if (matches.length > 1) return { ok: false, reason: "ambiguous", count: matches.length };
+
+  const startIdx = matches[0];
+  // Sesuaikan indentasi relatif jika baris non-kosong pertama memiliki selisih spasi
+  const firstNonEmptyIdx = targetLines.findIndex((l) => l.trim().length > 0);
+  let adjustedReplacement = replacementLines;
+  if (firstNonEmptyIdx !== -1) {
+    const fileIndent = (contentLines[startIdx + firstNonEmptyIdx].match(/^[ \t]*/) || [""])[0];
+    const targetIndent = (targetLines[firstNonEmptyIdx].match(/^[ \t]*/) || [""])[0];
+    if (fileIndent !== targetIndent) {
+      adjustedReplacement = replacementLines.map((line) => {
+        if (!line.trim()) return line;
+        if (targetIndent && line.startsWith(targetIndent)) {
+          return fileIndent + line.slice(targetIndent.length);
+        }
+        if (!targetIndent) {
+          return fileIndent + line;
+        }
+        return line;
+      });
+    }
+  }
+
+  const updatedLines = [
+    ...contentLines.slice(0, startIdx),
+    ...adjustedReplacement,
+    ...contentLines.slice(startIdx + m)
+  ];
+  return {
+    ok: true,
+    content: updatedLines.join(eol),
+    occurrences: 1,
+    mode: "fuzzy-indent",
+    diffLines: adjustedReplacement.length - m
+  };
+}
+
+function applySingleEdit(content, target, replacement) {
+  let effectiveTarget = target;
+  let mode = "exact";
+
+  if (!content.includes(effectiveTarget)) {
+    const lfTarget = target.replace(/\r\n/g, "\n");
+    const crlfTarget = target.replace(/\n/g, "\r\n");
+    if (content.includes(lfTarget)) {
+      effectiveTarget = lfTarget;
+      mode = "line-ending";
+    } else if (content.includes(crlfTarget)) {
+      effectiveTarget = crlfTarget;
+      mode = "line-ending";
+    } else {
+      return fuzzyLineReplace(content, target, replacement);
+    }
+  }
+
+  const occurrences = content.split(effectiveTarget).length - 1;
+  const newContent = content.replaceAll(effectiveTarget, replacement);
+  const diffLines = replacement.split("\n").length - effectiveTarget.split("\n").length;
+  return {
+    ok: true,
+    content: newContent,
+    occurrences,
+    mode,
+    diffLines
+  };
+}
 
 /**
  * Tool: file_read
@@ -64,9 +262,12 @@ async function toolFileWrite({ path: filePath, content, sessionId }) {
 
   try {
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
-    fs.writeFileSync(resolved, String(content), "utf-8");
-    const size = Buffer.byteLength(String(content), "utf-8");
-    return `✅ Berhasil menulis ${toSandboxPath(resolved, sessionId)} (${size} bytes)`;
+    recordFileSnapshot(sessionId, resolved, "file_write");
+    const strContent = String(content);
+    fs.writeFileSync(resolved, strContent, "utf-8");
+    const size = Buffer.byteLength(strContent, "utf-8");
+    const syntaxWarn = checkFileSyntax(resolved, strContent);
+    return `✅ Berhasil menulis ${toSandboxPath(resolved, sessionId)} (${size} bytes)${syntaxWarn}`;
   } catch (err) {
     return `❌ Gagal menulis file: ${err.message}`;
   }
@@ -74,17 +275,33 @@ async function toolFileWrite({ path: filePath, content, sessionId }) {
 
 /**
  * Tool: file_edit
- * Mengganti blok teks 'target' dengan 'replacement' tanpa menyentuh sisa file.
+ * Mengganti satu blok ('target' -> 'replacement') atau banyak blok sekaligus ('edits': [{target, replacement}]).
+ * Mendukung pencocokan persis, normalisasi CRLF/LF, dan toleransi indentasi (fuzzy-indent).
  */
-async function toolFileEdit({ path: filePath, target, replacement, sessionId }) {
+async function toolFileEdit({ path: filePath, target, replacement, edits, sessionId }) {
   if (!filePath || typeof filePath !== "string") {
     return "❌ Parameter 'path' wajib berupa string.";
   }
-  if (typeof target !== "string" || target.length === 0) {
-    return "❌ Parameter 'target' wajib berupa string teks yang ingin diganti (tidak boleh kosong).";
+
+  const editList = [];
+  if (typeof target === "string" && target.length > 0) {
+    if (typeof replacement !== "string") {
+      return "❌ Parameter 'replacement' wajib berupa string (gunakan string kosong \"\" jika ingin menghapus target).";
+    }
+    editList.push({ target, replacement });
   }
-  if (typeof replacement !== "string") {
-    return "❌ Parameter 'replacement' wajib berupa string (gunakan string kosong \"\" jika ingin menghapus target).";
+  if (Array.isArray(edits)) {
+    for (let i = 0; i < edits.length; i++) {
+      const item = edits[i];
+      if (!item || typeof item.target !== "string" || item.target.length === 0 || typeof item.replacement !== "string") {
+        return `❌ Item edits[${i}] tidak valid: wajib memiliki 'target' (string tidak kosong) dan 'replacement' (string).`;
+      }
+      editList.push({ target: item.target, replacement: item.replacement });
+    }
+  }
+
+  if (editList.length === 0) {
+    return "❌ Berikan parameter 'target' & 'replacement' atau array 'edits' ([{target, replacement}]).";
   }
 
   const guard = resolveFilePath(filePath, sessionId);
@@ -96,40 +313,113 @@ async function toolFileEdit({ path: filePath, target, replacement, sessionId }) 
   }
 
   try {
-    const content = fs.readFileSync(resolved, "utf-8");
+    const originalContent = fs.readFileSync(resolved, "utf-8");
+    let workingContent = originalContent;
+    let totalOccurrences = 0;
+    let totalDiffLines = 0;
+    let usedFuzzy = false;
 
-    // Tangani normalisasi line-ending jika file menggunakan CRLF vs LF
-    let effectiveTarget = target;
-    if (!content.includes(effectiveTarget)) {
-      if (content.includes(target.replace(/\r\n/g, "\n"))) {
-        effectiveTarget = target.replace(/\r\n/g, "\n");
-      } else if (content.includes(target.replace(/\n/g, "\r\n"))) {
-        effectiveTarget = target.replace(/\n/g, "\r\n");
+    for (let i = 0; i < editList.length; i++) {
+      const { target: t, replacement: r } = editList[i];
+      const res = applySingleEdit(workingContent, t, r);
+      if (!res.ok) {
+        const label = editList.length > 1 ? ` pada edits[${i}]` : "";
+        if (res.reason === "ambiguous") {
+          return (
+            `❌ Target teks${label} ditemukan di ${res.count} lokasi dengan indentasi berbeda dalam '${filePath}'.\n` +
+            `Tips: Sertakan 2-3 baris konteks di atas/bawahnya agar lokasi yang dimaksud unik.`
+          );
+        }
+        return (
+          `❌ Target teks${label} tidak ditemukan dalam file '${filePath}'.\n` +
+          `Tips: Gunakan tool 'file_read' terlebih dahulu untuk memeriksa isi file yang sebenarnya.`
+        );
       }
+      workingContent = res.content;
+      totalOccurrences += res.occurrences;
+      totalDiffLines += res.diffLines;
+      if (res.mode === "fuzzy-indent") usedFuzzy = true;
     }
 
-    if (!content.includes(effectiveTarget)) {
-      return (
-        `❌ Target teks tidak ditemukan dalam file '${filePath}'.\n` +
-        `Tips: Pastikan teks 'target' sama persis karakter per karakter termasuk spasi dan indentasi. ` +
-        `Gunakan tool 'file_read' terlebih dahulu untuk melihat isi file yang sebenarnya.`
-      );
-    }
+    recordFileSnapshot(sessionId, resolved, "file_edit");
+    fs.writeFileSync(resolved, workingContent, "utf-8");
 
-    const occurrences = content.split(effectiveTarget).length - 1;
-    const newContent = content.replaceAll(effectiveTarget, replacement);
-    fs.writeFileSync(resolved, newContent, "utf-8");
-
-    const diffLines = replacement.split("\n").length - effectiveTarget.split("\n").length;
-    const diffStr = diffLines >= 0 ? `+${diffLines}` : `${diffLines}`;
+    const diffStr = totalDiffLines >= 0 ? `+${totalDiffLines}` : `${totalDiffLines}`;
+    const fuzzyNote = usedFuzzy ? " [toleransi indentasi otomatis]" : "";
+    const syntaxWarn = checkFileSyntax(resolved, workingContent);
 
     return (
-      `✅ Berhasil mengedit file '${filePath}' (${occurrences} bagian diganti, ${diffStr} baris).\n` +
-      `Dari sandbox terlihat sebagai: ${toSandboxPath(resolved, sessionId)}`
+      `✅ Berhasil mengedit file '${filePath}' (${totalOccurrences} bagian diganti, ${diffStr} baris)${fuzzyNote}.\n` +
+      `Dari sandbox terlihat sebagai: ${toSandboxPath(resolved, sessionId)}${syntaxWarn}`
     );
   } catch (err) {
     return `❌ Gagal mengedit file: ${err.message}`;
   }
+}
+
+/**
+ * Tool: workspace_undo
+ * Mengembalikan perubahan file terakhir (dari file_write / file_edit) atau menampilkan daftar riwayat snapshot.
+ */
+async function toolWorkspaceUndo({ path: filePath, steps = 1, action = "undo", sessionId }) {
+  const sid = String(sessionId || "default");
+  const stack = fileUndoStacks.get(sid) || [];
+
+  if (action === "list") {
+    if (stack.length === 0) {
+      return "ℹ️ Belum ada riwayat perubahan file (snapshot) yang tercatat di sesi ini.";
+    }
+    const lines = [...stack]
+      .reverse()
+      .map((s, idx) => `${idx + 1}. [${s.op}] ${s.sandboxPath} (${s.existed ? "ubah file" : "buat file baru"}) — ${new Date(s.ts).toLocaleTimeString("id-ID")}`);
+    return `⏪ Riwayat Snapshot Undo (${stack.length} perubahan terakhir, terbaru di atas):\n${lines.join("\n")}`;
+  }
+
+  if (stack.length === 0) {
+    return "❌ Tidak ada riwayat perubahan file yang bisa di-undo di sesi ini.";
+  }
+
+  let targetResolved = null;
+  if (filePath && typeof filePath === "string" && filePath.trim()) {
+    const guard = resolveFilePath(filePath.trim(), sid);
+    if (!guard.ok) return `⛔ ${guard.error}`;
+    targetResolved = guard.path;
+  }
+
+  const count = Math.max(1, Math.min(Number(steps) || 1, 10));
+  const restored = [];
+
+  for (let n = 0; n < count; n++) {
+    let idx = -1;
+    for (let i = stack.length - 1; i >= 0; i--) {
+      if (!targetResolved || stack[i].resolvedPath === targetResolved) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) break;
+
+    const snap = stack.splice(idx, 1)[0];
+    const guard = resolveFilePath(snap.resolvedPath, sid);
+    if (!guard.ok) continue;
+
+    if (snap.existed) {
+      fs.mkdirSync(path.dirname(guard.path), { recursive: true });
+      fs.writeFileSync(guard.path, snap.prevContent, "utf-8");
+      restored.push(`• ${snap.sandboxPath}: dikembalikan ke kondisi sebelum ${snap.op}`);
+    } else {
+      try {
+        fs.rmSync(guard.path, { force: true });
+      } catch (_) {}
+      restored.push(`• ${snap.sandboxPath}: file baru hasil ${snap.op} dihapus kembali`);
+    }
+  }
+
+  if (restored.length === 0) {
+    return `❌ Tidak ditemukan riwayat perubahan untuk '${filePath || "workspace"}' yang bisa di-undo.`;
+  }
+
+  return `⏪ Berhasil membatalkan ${restored.length} perubahan file:\n${restored.join("\n")}`;
 }
 
 /**
@@ -176,6 +466,129 @@ async function toolFileList({ path: dirPath, sessionId }) {
   } catch (err) {
     return `❌ Gagal membaca direktori: ${err.message}`;
   }
+}
+
+const IGNORED_SEARCH_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".memory",
+  ".bg",
+  "__pycache__",
+  ".next",
+  "dist",
+  "build",
+  ".cache",
+  "venv",
+  ".venv"
+]);
+
+function matchFilePattern(fileName, pattern) {
+  if (!pattern || !String(pattern).trim()) return true;
+  const p = String(pattern).trim().toLowerCase();
+  const name = fileName.toLowerCase();
+  if (p.startsWith("*.")) return name.endsWith(p.slice(1));
+  if (p.startsWith(".")) return name.endsWith(p);
+  if (p.includes("*")) {
+    const escaped = p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`, "i").test(name);
+  }
+  return name.includes(p);
+}
+
+/**
+ * Tool: code_search
+ * Pencarian teks atau pola regex lintas seluruh file kode di dalam workspace sesi.
+ */
+async function toolCodeSearch({ query, path: searchPath, file_pattern, case_sensitive = false, max_results = 30, sessionId }) {
+  if (!query || typeof query !== "string" || !query.trim()) {
+    return "❌ Parameter 'query' wajib diisi (teks atau pola regex yang dicari).";
+  }
+
+  const guard = resolveFilePath(searchPath || "/workspace", sessionId);
+  if (!guard.ok) return `⛔ ${guard.error}`;
+  const rootPath = guard.path;
+
+  if (!fs.existsSync(rootPath)) {
+    return `❌ Path tidak ditemukan: ${toSandboxPath(rootPath, sessionId)}`;
+  }
+
+  const limit = Math.min(Math.max(Number(max_results) || 30, 1), 80);
+  const flags = case_sensitive ? "" : "i";
+  let matcher;
+  try {
+    const regex = new RegExp(query, flags);
+    matcher = (line) => regex.test(line);
+  } catch (_) {
+    const needle = case_sensitive ? query : query.toLowerCase();
+    matcher = (line) => (case_sensitive ? line : line.toLowerCase()).includes(needle);
+  }
+
+  const matches = [];
+  let filesScanned = 0;
+
+  const searchOneFile = (fullPath) => {
+    if (matches.length >= limit) return;
+    if (isSensitiveFile(fullPath)) return;
+    try {
+      const st = fs.lstatSync(fullPath);
+      if (st.isSymbolicLink() || !st.isFile() || st.size > 2 * 1024 * 1024 || st.size === 0) return;
+      const buf = fs.readFileSync(fullPath);
+      // Lewati file biner (mengandung null byte di 1024 byte pertama)
+      const checkLen = Math.min(buf.length, 1024);
+      for (let i = 0; i < checkLen; i++) {
+        if (buf[i] === 0) return;
+      }
+      filesScanned++;
+      const lines = buf.toString("utf-8").split(/\r?\n/);
+      const displayPath = toSandboxPath(fullPath, sessionId);
+      for (let idx = 0; idx < lines.length; idx++) {
+        if (matcher(lines[idx])) {
+          matches.push(`${displayPath}:${idx + 1}: ${lines[idx].trim().slice(0, 180)}`);
+          if (matches.length >= limit) break;
+        }
+      }
+    } catch (_) {}
+  };
+
+  const walk = (dir) => {
+    if (matches.length >= limit) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    for (const entry of entries) {
+      if (matches.length >= limit) break;
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (IGNORED_SEARCH_DIRS.has(entry.name)) continue;
+        walk(full);
+      } else if (entry.isFile()) {
+        if (!matchFilePattern(entry.name, file_pattern)) continue;
+        searchOneFile(full);
+      }
+    }
+  };
+
+  const rootStat = fs.statSync(rootPath);
+  if (rootStat.isFile()) {
+    searchOneFile(rootPath);
+  } else if (rootStat.isDirectory()) {
+    walk(rootPath);
+  }
+
+  if (matches.length === 0) {
+    return `🔍 Tidak ditemukan kecocokan untuk "${query}" (${filesScanned} file diperiksa di ${toSandboxPath(rootPath, sessionId)}).`;
+  }
+
+  const moreNote = matches.length >= limit ? `\n\n(Menampilkan ${limit} hasil pertama. Persempit query atau isi 'path' / 'file_pattern' jika perlu.)` : "";
+  return truncate(
+    `🔎 Hasil pencarian "${query}" (${matches.length} baris cocok dari ${filesScanned} file):\n\n` +
+      matches.join("\n") +
+      moreNote
+  );
 }
 
 /**
@@ -286,6 +699,9 @@ module.exports = {
   toolFileWrite,
   toolFileEdit,
   toolFileList,
+  toolCodeSearch,
+  toolWorkspaceUndo,
+  checkFileSyntax,
   toolSendPhoto,
   toolSendFile,
   findWorkspaceFile

@@ -248,15 +248,16 @@ async function newTopic(chatId) {
   return { purge: Promise.resolve() };
 }
 
-// === PENGATURAN BOT DINAMIS (MODEL, BASE_URL, API_KEY) ===
+// === PENGATURAN BOT DINAMIS (MODEL, BASE_URL, API_KEY, FALLBACK_MODELS) ===
 async function getBotConfig() {
-  const res = await query("SELECT model, base_url, api_key, updated_at FROM bot_config WHERE id = 1");
+  const res = await query("SELECT model, base_url, api_key, fallback_models, updated_at FROM bot_config WHERE id = 1");
   const row = res.rows[0];
-  if (row && (row.model || row.base_url || row.api_key)) {
+  if (row && (row.model || row.base_url || row.api_key || row.fallback_models)) {
     return {
       model: row.model || null,
       baseUrl: row.base_url || null,
       apiKey: row.api_key || null,
+      fallbackModels: row.fallback_models != null ? row.fallback_models : null,
       updated_at: row.updated_at != null ? Number(row.updated_at) : null
     };
   }
@@ -264,19 +265,26 @@ async function getBotConfig() {
 }
 
 async function saveBotConfig(config) {
+  const fbStr = Array.isArray(config.fallbackModels)
+    ? config.fallbackModels.join(" ")
+    : typeof config.fallbackModels === "string"
+      ? config.fallbackModels
+      : null;
   const doc = {
     model: config.model || null,
     baseUrl: config.baseUrl || null,
     apiKey: config.apiKey || null,
+    fallbackModels: fbStr,
     updated_at: Date.now()
   };
   await query(
-    `INSERT INTO bot_config (id, model, base_url, api_key, updated_at)
-     VALUES (1, $1, $2, $3, $4)
+    `INSERT INTO bot_config (id, model, base_url, api_key, fallback_models, updated_at)
+     VALUES (1, $1, $2, $3, $4, $5)
      ON CONFLICT (id) DO UPDATE
        SET model = EXCLUDED.model, base_url = EXCLUDED.base_url,
-           api_key = EXCLUDED.api_key, updated_at = EXCLUDED.updated_at`,
-    [doc.model, doc.baseUrl, doc.apiKey, doc.updated_at]
+           api_key = EXCLUDED.api_key, fallback_models = EXCLUDED.fallback_models,
+           updated_at = EXCLUDED.updated_at`,
+    [doc.model, doc.baseUrl, doc.apiKey, doc.fallbackModels, doc.updated_at]
   );
   return doc;
 }

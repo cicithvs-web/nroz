@@ -5,7 +5,7 @@
 const fs = require("fs");
 const path = require("path");
 const ctx = require("./context");
-const { OWNER_ID, getConfig, updateConfig, resetConfig, maskKey, isOwner } = require("./config");
+const { OWNER_ID, getConfig, updateConfig, resetConfig, parseFallbackModels, maskKey, isOwner } = require("./config");
 const { replyText, startTyping, stopTyping } = require("./send");
 const { turnQueue } = require("./turnQueue");
 const { runQueued } = require("./queuedTurn");
@@ -57,6 +57,7 @@ const OWNER_COMMANDS = [
   ...PUBLIC_COMMANDS,
   { command: "config", description: "👑 Lihat model, Base URL, API key" },
   { command: "setmodel", description: "👑 Ganti model AI" },
+  { command: "setfallback", description: "👑 Set daftar model cadangan (bisa >1 model)" },
   { command: "setbaseurl", description: "👑 Ganti Base URL API" },
   { command: "setapikey", description: "👑 Ganti API key" },
   { command: "resetconfig", description: "👑 Kembalikan pengaturan ke .env" },
@@ -133,7 +134,8 @@ function buildTasksMessage(sessionId) {
     wList.forEach((w, i) => {
       const status = w.isCurrentlyDown ? "🔴 down" : w.lastChecked ? "🟢 normal" : "⏳ belum dicek";
       const lastCheck = w.lastChecked ? formatInZone(w.lastChecked) : "belum";
-      text += `${i + 1}. ${noMd(w.url)}\n    tiap ${w.intervalMinutes} menit · ${status} · terakhir ${lastCheck}\n`;
+      const healBadge = w.autoHealTask ? " · 🔧 Self-Healing" : "";
+      text += `${i + 1}. ${noMd(w.url)}\n    tiap ${w.intervalMinutes} menit · ${status}${healBadge} · terakhir ${lastCheck}\n`;
       keyboard.push([
         {
           text: `❌ Hentikan pemantau ${i + 1}: ${clip(w.url.replace(/^https?:\/\//, ""), 24)}`,
@@ -551,9 +553,14 @@ function registerCommands(bot) {
     }
 
     const currentConfig = getConfig();
+    const fbDisplay =
+      currentConfig.fallbackModels && currentConfig.fallbackModels.length > 0
+        ? currentConfig.fallbackModels.map((m, idx) => `${idx + 1}. \`${m}\``).join(" → ")
+        : "`(belum diatur)`";
     const text = `⚙️ *Pengaturan Nroz AI Bot*
 
-• *Model:* \`${currentConfig.model || "(belum diatur)"}\`
+• *Model Utama:* \`${currentConfig.model || "(belum diatur)"}\`
+• *Fallback Model:* ${fbDisplay}
 • *Base URL:* \`${currentConfig.baseUrl || "(belum diatur)"}\`
 • *API Key:* \`${maskKey(currentConfig.apiKey)}\`
 • *Owner ID:* \`${OWNER_ID}\`
@@ -561,6 +568,10 @@ function registerCommands(bot) {
 *Perintah untuk mengubah:*
 • \`/setmodel <nama_model>\`
 Contoh: \`/setmodel gpt-4o\`
+
+• \`/setfallback <model1> [model2] ...\`
+Contoh: \`/setfallback glm/glm-5.3-flash deepseek/deepseek-v4.1-flash-1017 anthropic/haiku-5.5\`
+_(Ketik \`/setfallback off\` untuk menonaktifkan fallback)_
 
 • \`/setbaseurl <url>\`
 Contoh: \`/setbaseurl https://router.clouvia.id/v1\`
@@ -603,6 +614,48 @@ Kembalikan ke pengaturan awal dari .env`;
     }
 
     await replyText(msg, `✅ *Model AI berhasil diubah!*\n\nModel aktif sekarang:\n\`${newModel}\``);
+  });
+
+  // --- PERINTAH OWNER: UBAH FALLBACK MODEL (BISA BANYAK MODEL) ---
+  bot.onText(/^\/setfallback(?:@\w+)?(?:\s+([\s\S]+))?$/, async (msg, match) => {
+    if (msg.from && msg.from.is_bot) return;
+    if (!isOwner(msg)) {
+      return replyText(msg, "⛔ Perintah ini khusus untuk Owner bot.");
+    }
+
+    const rawArg = (match[1] || "").trim();
+    if (!rawArg) {
+      const current = getConfig().fallbackModels || [];
+      const curText = current.length
+        ? current.map((m, i) => `${i + 1}. \`${m}\``).join("\n")
+        : "_(Belum ada model cadangan)_";
+      return replyText(
+        msg,
+        `🛡️ *Daftar Fallback Model Saat Ini:*\n${curText}\n\n` +
+          `*Cara mengatur (bisa 1 atau beberapa model berurutan):*\n` +
+          `\`/setfallback glm/glm-5.3-flash deepseek/deepseek-v4.1-flash-1017 anthropic/haiku-5.5 openai/gpt-6-luna\`\n\n` +
+          `Atau ketik \`/setfallback off\` untuk mengosongkan daftar fallback.`
+      );
+    }
+
+    const models = parseFallbackModels(rawArg);
+    updateConfig({ fallbackModels: models });
+    try {
+      await saveBotConfig(getConfig());
+    } catch (err) {
+      console.warn("[Config] Gagal simpan fallbackModels ke PostgreSQL:", err.message);
+    }
+
+    if (models.length === 0) {
+      return replyText(msg, "ℹ️ *Fallback Model dinonaktifkan* (daftar model cadangan dikosongkan).");
+    }
+
+    const formatted = models.map((m, idx) => `${idx + 1}. \`${m}\``).join("\n");
+    await replyText(
+      msg,
+      `✅ *Daftar Fallback Model berhasil diperbarui (${models.length} model)!*\n\n` +
+        `Urutan prioritas model cadangan saat model utama gangguan:\n${formatted}`
+    );
   });
 
   // --- PERINTAH OWNER: UBAH BASE URL ---

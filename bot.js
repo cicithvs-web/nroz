@@ -93,6 +93,9 @@ startAutoCleanup(3);
 bot
   .getMe()
   .then((me) => {
+    if (me && me.id) {
+      ctx.botId = me.id;
+    }
     if (me && me.username) {
       ctx.botUsername = me.username;
       console.log(`[Bot] Terhubung sebagai @${me.username} (ID: ${me.id})`);

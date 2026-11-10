@@ -15,7 +15,7 @@ const http = require("http");
 const crypto = require("crypto");
 const path = require("path");
 const { writeJsonAtomic, readJsonSafe } = require("./lib/atomicFile");
-const { startWebPreview } = require("./webPreviewManager.js");
+const { startWebPreview, isWebPreviewActive } = require("./webPreviewManager.js");
 
 const DATA_FILE = path.join(__dirname, "webhook_data.json");
 const WEBHOOK_PORT = Number(process.env.WEBHOOK_PORT) || 4790;
@@ -264,7 +264,7 @@ function hookUrlByName(name, baseUrl) {
  * restart bot — panggil ulang perintah /webhookurl setelah restart.
  */
 async function ensureTunnel() {
-  if (tunnelUrl) return tunnelUrl;
+  if (tunnelUrl && isWebPreviewActive(WEBHOOK_PORT, "127.0.0.1")) return tunnelUrl;
   tunnelUrl = await startWebPreview(WEBHOOK_PORT, Math.ceil(TUNNEL_HOURS * 60), { allowHost: true });
   return tunnelUrl;
 }

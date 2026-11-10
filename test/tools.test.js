@@ -96,3 +96,201 @@ test("create_reminder dengan jam absolut dan pengulangan", async () => {
   const s = require("../schedulerManager");
   for (const r of s.listTasks(sid).reminders) s.removeTask(sid, r.id);
 });
+
+test("file_edit multi-edit, fuzzy indentation match, dan workspace_undo", async () => {
+  const sid = `test_undo_${process.pid}_${Date.now()}`;
+  const ws = path.join(WORKSPACE_BASE, sid);
+  const ctx = { sessionId: sid };
+  try {
+    const initial = [
+      "function greet(name) {",
+      "    const msg = 'Halo ' + name;",
+      "    return msg;",
+      "}",
+      "const port = 3000;"
+    ].join("\n");
+
+    await executeTool("file_write", { path: "app.js", content: initial }, ctx);
+
+    // 1. Fuzzy indentation match (target memakai 2 spasi, file asli memakai 4 spasi) + multi-edit
+    const editRes = await executeTool(
+      "file_edit",
+      {
+        path: "app.js",
+        edits: [
+          {
+            target: "  const msg = 'Halo ' + name;\n  return msg;",
+            replacement: "  const msg = `Hai ${name}!`;\n  return msg.toUpperCase();"
+          },
+          {
+            target: "const port = 3000;",
+            replacement: "const port = 8080;"
+          }
+        ]
+      },
+      ctx
+    );
+    assert.match(editRes, /^✅/);
+    assert.match(editRes, /toleransi indentasi otomatis/);
+
+    const afterEdit = fs.readFileSync(path.join(ws, "app.js"), "utf-8");
+    assert.ok(afterEdit.includes("    const msg = `Hai ${name}!`;"));
+    assert.ok(afterEdit.includes("const port = 8080;"));
+
+    // 2. List snapshot undo
+    const listRes = await executeTool("workspace_undo", { action: "list" }, ctx);
+    assert.match(listRes, /file_edit/);
+    assert.match(listRes, /file_write/);
+
+    // 3. Undo 1 langkah (kembalikan file_edit ke isi awal)
+    const undoEdit = await executeTool("workspace_undo", { steps: 1 }, ctx);
+    assert.match(undoEdit, /^⏪/);
+    assert.equal(fs.readFileSync(path.join(ws, "app.js"), "utf-8"), initial);
+
+    // 4. Undo 1 langkah lagi (batalkan file_write pembuatan file baru)
+    const undoWrite = await executeTool("workspace_undo", { steps: 1 }, ctx);
+    assert.match(undoWrite, /^⏪/);
+    assert.equal(fs.existsSync(path.join(ws, "app.js")), false);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("delegate_parallel_tasks menjalankan beberapa subagent secara paralel", async () => {
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async ({ messages }) => {
+          const userMsg = messages.find((m) => m.role === "user")?.content || "";
+          return {
+            choices: [
+              {
+                message: {
+                  content: `Selesai untuk: ${userMsg.slice(0, 60)}`,
+                  tool_calls: []
+                }
+              }
+            ]
+          };
+        }
+      }
+    }
+  };
+
+  const res = await executeTool(
+    "delegate_parallel_tasks",
+    {
+      tasks: [
+        { role: "researcher", task: "Riset kompetitor A" },
+        { role: "coder", task: "Buat struktur komponen B" }
+      ]
+    },
+    { sessionId: "test_swarm", client: fakeClient, model: "fake-model" }
+  );
+  assert.match(res, /Laporan Swarm Paralel: 2 Subagent Selesai/);
+  assert.match(res, /RESEARCHER/);
+  assert.match(res, /CODER/);
+});
+
+test("analyzeScreenshotWithVision mengembalikan analisis UI dari model vision", async () => {
+  const { analyzeScreenshotWithVision } = require("../mcpManager");
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [{ message: { content: "1. Halaman tampil normal.\n2. Layout rapi." } }]
+        })
+      }
+    }
+  };
+  const note = await analyzeScreenshotWithVision("aGVsbG8=", "image/png", { client: fakeClient, model: "vision-model" }, {});
+  assert.match(note, /Halaman tampil normal/);
+});
+
+test("code_search, instant syntax checker pada file_write, dan createChatCompletionWithRetry", async () => {
+  const sid = `test_search_${process.pid}_${Date.now()}`;
+  const ws = path.join(WORKSPACE_BASE, sid);
+  const ctx = { sessionId: sid };
+  try {
+    // 1. Instant Syntax Checker pada JSON & JS rusak
+    const badJson = await executeTool("file_write", { path: "broken.json", content: '{ "a": 1, }' }, ctx);
+    assert.match(badJson, /Peringatan Sintaks JSON/);
+
+    const badJs = await executeTool("file_write", { path: "broken.js", content: "function x( { return 1; }" }, ctx);
+    assert.match(badJs, /Peringatan Sintaks JS/);
+
+    // 2. File valid tidak mengeluarkan peringatan sintaks
+    const goodJs = await executeTool(
+      "file_write",
+      { path: "src/auth.js", content: "function handleUserLogin(req) {\n  return true;\n}\n" },
+      ctx
+    );
+    assert.doesNotMatch(goodJs, /Peringatan Sintaks/);
+
+    // 3. code_search menemukan fungsi beserta nomor baris
+    const searchRes = await executeTool("code_search", { query: "handleUserLogin", file_pattern: "*.js" }, ctx);
+    assert.match(searchRes, /\/workspace\/src\/auth\.js:1:/);
+    assert.match(searchRes, /handleUserLogin/);
+
+    // 4. Auto-Retry pada error timeout sementara & Multi-Model Fallback
+    const { createChatCompletionWithRetry, parseFallbackModels, updateConfig } = require("../bot/config");
+    assert.deepEqual(
+      parseFallbackModels("glm/glm-5.3-flash deepseek/deepseek-v4.1-flash-1017, anthropic/haiku-5.5"),
+      ["glm/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017", "anthropic/haiku-5.5"]
+    );
+    assert.deepEqual(parseFallbackModels("off"), []);
+
+    let calls = 0;
+    const flakyClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls++;
+            if (calls < 2) throw new Error("Request timed out.");
+            return { choices: [{ message: { content: "Berhasil setelah retry" } }] };
+          }
+        }
+      }
+    };
+    const retryRes = await createChatCompletionWithRetry(
+      flakyClient,
+      { model: "test-model", messages: [] },
+      { maxAttempts: 3, baseDelayMs: 10, label: "TestRetry" }
+    );
+    assert.equal(calls, 2);
+    assert.equal(retryRes.choices[0].message.content, "Berhasil setelah retry");
+
+    // 5. Jika model utama & fallback ke-1 gagal, lanjut ke fallback ke-2
+    const prevFallbacks = require("../bot/config").getConfig().fallbackModels;
+    updateConfig({ fallbackModels: ["glm/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017"] });
+    try {
+      const triedModels = [];
+      const multiFbClient = {
+        chat: {
+          completions: {
+            create: async ({ model }) => {
+              triedModels.push(model);
+              if (model !== "deepseek/deepseek-v4.1-flash-1017") {
+                throw new Error(`Model ${model} sedang penuh`);
+              }
+              return { choices: [{ message: { content: `Dijawab oleh ${model}` } }] };
+            }
+          }
+        }
+      };
+      const fbRes = await createChatCompletionWithRetry(
+        multiFbClient,
+        { model: "primary-model", messages: [] },
+        { maxAttempts: 1, baseDelayMs: 5, label: "TestMultiFallback" }
+      );
+      assert.deepEqual(triedModels, ["primary-model", "glm/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017"]);
+      assert.equal(fbRes.choices[0].message.content, "Dijawab oleh deepseek/deepseek-v4.1-flash-1017");
+    } finally {
+      updateConfig({ fallbackModels: prevFallbacks });
+    }
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+

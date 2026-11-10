@@ -235,8 +235,9 @@ const TOOL_DEFINITIONS = [
       name: "file_edit",
       description:
         "Melakukan pengeditan bedah presisi (surgical replacement) pada file yang sudah ada di workspace (/workspace/...). " +
-        "Mencari blok teks 'target' yang sama persis dan menggantinya dengan 'replacement'. " +
-        "SANGAT DIREKOMENDASIKAN daripada file_write untuk mengubah kode yang sudah ada agar tidak menghapus atau merusak baris kode lainnya.",
+        "Mendukung pengeditan tunggal ('target' & 'replacement') maupun multi-edit sekaligus dalam satu panggilan ('edits': [{target, replacement}]). " +
+        "Dilengkapi toleransi indentasi otomatis (fuzzy-indent match) jika spasi tepi sedikit berbeda namun barisnya unik, serta otomatis menyimpan snapshot untuk 'workspace_undo'. " +
+        "SANGAT DIREKOMENDASIKAN daripada file_write untuk mengubah kode yang sudah ada.",
       parameters: {
         type: "object",
         properties: {
@@ -246,14 +247,56 @@ const TOOL_DEFINITIONS = [
           },
           target: {
             type: "string",
-            description: "Blok karakter/baris teks yang sama persis yang ingin diganti (termasuk spasi/indentasi)",
+            description: "Blok teks yang ingin diganti (untuk edit tunggal; opsional jika memakai 'edits')",
           },
           replacement: {
             type: "string",
-            description: "Teks pengganti baru (kosongkan \"\" jika ingin menghapus blok target)",
+            description: "Teks pengganti baru (kosongkan \"\" jika ingin menghapus blok target; opsional jika memakai 'edits')",
+          },
+          edits: {
+            type: "array",
+            description: "Daftar beberapa blok pengeditan berurutan dalam satu file: [{ target, replacement }]",
+            items: {
+              type: "object",
+              properties: {
+                target: { type: "string", description: "Blok teks yang ingin diganti" },
+                replacement: { type: "string", description: "Teks pengganti baru" },
+              },
+              required: ["target", "replacement"],
+            },
           },
         },
-        required: ["path", "target", "replacement"],
+        required: ["path"],
+      },
+    },
+  },
+
+  // --- workspace_undo ---
+  {
+    type: "function",
+    function: {
+      name: "workspace_undo",
+      description:
+        "Membatalkan (undo/rollback) perubahan file terakhir yang dilakukan lewat file_write atau file_edit berdasarkan snapshot otomatis, " +
+        "atau menampilkan daftar riwayat snapshot yang tersedia (action: 'list'). Gunakan jika perubahan kode menyebabkan error atau ingin kembali ke versi file sebelumnya secara instan.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["undo", "list"],
+            description: "'undo' (default) untuk membatalkan perubahan terakhir, atau 'list' untuk melihat daftar riwayat snapshot.",
+          },
+          path: {
+            type: "string",
+            description: "Opsional. Path file spesifik yang ingin di-undo (kosongkan untuk meng-undo perubahan terakhir di file mana pun).",
+          },
+          steps: {
+            type: "number",
+            description: "Berapa langkah perubahan terakhir yang ingin dibatalkan (default: 1, maks: 10).",
+          },
+        },
+        required: [],
       },
     },
   },
@@ -275,6 +318,44 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: [],
+      },
+    },
+  },
+
+  // --- h2) code_search ---
+  {
+    type: "function",
+    function: {
+      name: "code_search",
+      description:
+        "Mencari teks atau pola regex secara cepat di seluruh file kode dalam workspace (/workspace/...). " +
+        "Mengembalikan path file, nomor baris, dan potongan baris yang cocok. Otomatis melewati folder node_modules, .git, dan file biner. " +
+        "Sangat berguna untuk menemukan lokasi fungsi, variabel, endpoint, atau error sebelum memakai file_read / file_edit.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Teks atau pola regex yang dicari (contoh: 'handleLogin' atau 'app\\.(get|post)')",
+          },
+          path: {
+            type: "string",
+            description: "Opsional. Subdirektori atau file spesifik di dalam /workspace yang ingin dicari (default: /workspace).",
+          },
+          file_pattern: {
+            type: "string",
+            description: "Opsional. Filter nama/ekstensi file (contoh: '*.js', '*.py', '.tsx').",
+          },
+          case_sensitive: {
+            type: "boolean",
+            description: "Opsional. true jika huruf besar/kecil harus dibedakan (default: false).",
+          },
+          max_results: {
+            type: "number",
+            description: "Opsional. Batas jumlah baris hasil pencarian (default: 30, maks: 80).",
+          },
+        },
+        required: ["query"],
       },
     },
   },
@@ -386,7 +467,9 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "create_watchdog",
       description:
-        "Memasang watchdog pemantau status website atau API server. Bot akan mengecek target URL secara berkala dan otomatis mengirimkan pesan peringatan di Telegram jika website down/error.",
+        "Memasang watchdog pemantau status website atau API server secara berkala. " +
+        "Mendukung mode SELF-HEALING: jika 'auto_heal_task' diisi, saat website terdeteksi down/error, kamu (AI Agent) akan otomatis dibangunkan " +
+        "untuk menjalankan instruksi diagnosa & perbaikan mandiri (cek log, restart service, fix konfigurasi) lalu melaporkan hasilnya ke Telegram!",
       parameters: {
         type: "object",
         properties: {
@@ -397,6 +480,12 @@ const TOOL_DEFINITIONS = [
           interval_minutes: {
             type: "number",
             description: "Interval pengecekan dalam menit (default 10 menit)",
+          },
+          auto_heal_task: {
+            type: "string",
+            description:
+              "Opsional (Self-Healing Mode). Instruksi perbaikan otomatis yang akan dieksekusi oleh AI Agent saat URL terdeteksi down " +
+              "(contoh: 'Cek log server di /workspace/work/app.log, restart proses node di port 3000, lalu cek ulang endpoint').",
           },
         },
         required: ["url"],
@@ -642,12 +731,9 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "delegate_task",
       description:
-        "Mendelegasikan tugas teknis berat, terstruktur, atau multi-langkah ke Subagent Mandiri (Orchestration pattern ala Antigravity). " +
-        "Subagent memiliki jendela konteks terisolasi, mengeksekusi tools (file_write, run_command, web_search, dsb) hingga tuntas, dan mengembalikan laporan ringkas ke kamu. " +
-        "Gunakan tool ini jika: " +
-        "(1) membuat proyek/kumpulan file kode lengkap di /workspace/work/ ('role': 'coder'), " +
-        "(2) riset web mendalam atau membaca banyak dokumen ('role': 'researcher'), atau " +
-        "(3) menguji kode, mencari bug, dan memeriksa respon server ('role': 'tester').",
+        "Mendelegasikan satu tugas teknis berat, terstruktur, atau multi-langkah ke Subagent Mandiri (Orchestration pattern ala Antigravity). " +
+        "Subagent memiliki jendela konteks terisolasi, mengeksekusi tools (file_write, run_command, web_search, browser_*, dsb) hingga tuntas, dan mengembalikan laporan ringkas ke kamu. " +
+        "Untuk menjalankan BEBERAPA subagent sekaligus secara bersamaan (paralel), gunakan 'delegate_parallel_tasks'.",
       parameters: {
         type: "object",
         properties: {
@@ -671,6 +757,50 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["role", "task"],
+      },
+    },
+  },
+
+  // --- r2) delegate_parallel_tasks ---
+  {
+    type: "function",
+    function: {
+      name: "delegate_parallel_tasks",
+      description:
+        "Menjalankan 2 hingga 4 Subagent Mandiri SECARA PARALEL BERSAMAAN (Swarm / Map-Reduce Orchestration). " +
+        "Gunakan tool ini saat tugas bisa dipecah menjadi beberapa pekerjaan independen agar selesai berkali-kali lipat lebih cepat " +
+        "(contoh: meriset 3 topik/kompetitor sekaligus, membedah beberapa modul berbeda, atau menjalankan 'researcher' dan 'coder' secara paralel).",
+      parameters: {
+        type: "object",
+        properties: {
+          tasks: {
+            type: "array",
+            description: "Daftar 2–4 tugas subagent yang akan dijalankan serentak secara paralel.",
+            items: {
+              type: "object",
+              properties: {
+                role: {
+                  type: "string",
+                  description: "Peran subagent (misal 'researcher', 'coder', 'tester', atau peran kustom).",
+                },
+                role_description: {
+                  type: "string",
+                  description: "Opsional. Deskripsi keahlian khusus untuk peran ini.",
+                },
+                task: {
+                  type: "string",
+                  description: "Instruksi tugas spesifik dan mandiri untuk subagent ini.",
+                },
+                max_rounds: {
+                  type: "number",
+                  description: "Batas langkah subagent ini (default: 10, maks: 20).",
+                },
+              },
+              required: ["role", "task"],
+            },
+          },
+        },
+        required: ["tasks"],
       },
     },
   },
@@ -826,8 +956,8 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "search_knowledge",
       description:
-        "Pencarian SEMANTIK (RAG) atas dokumen yang pernah di-upload user (PDF, DOCX, teks, kode) dan arsip " +
-        "percakapan masa lalu. Mencari berdasarkan makna, bukan cocok kata kunci persis — jadi bisa menemukan " +
+        "Pencarian SEMANTIK (RAG) atas dokumen yang pernah di-upload user (PDF, DOCX, teks, kode), catatan pengetahuan yang disimpan lewat save_knowledge, " +
+        "dan arsip percakapan masa lalu. Mencari berdasarkan makna, bukan cocok kata kunci persis — jadi bisa menemukan " +
         "jawaban walau kata-katanya berbeda. Gunakan SEBELUM menjawab pertanyaan yang mungkin sudah terjawab di " +
         "dokumen/obrolan lama (contoh: 'apa isi kontrak yang gue upload minggu lalu soal penalty?'). " +
         "Untuk mencocokkan kata persis di arsip chat, gunakan search_raw_memory.",
@@ -840,7 +970,7 @@ const TOOL_DEFINITIONS = [
           },
           source: {
             type: "string",
-            description: "Filter sumber opsional: 'upload' (dokumen user), 'chat' (percakapan), atau nama sumber spesifik. Kosong = semua.",
+            description: "Filter sumber opsional: 'upload' (dokumen user), 'chat' (percakapan), 'note' (pengetahuan dari save_knowledge), atau nama sumber spesifik. Kosong = semua.",
           },
           limit: {
             type: "number",
@@ -848,6 +978,31 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["query"],
+      },
+    },
+  },
+
+  // --- x2) save_knowledge ---
+  {
+    type: "function",
+    function: {
+      name: "save_knowledge",
+      description:
+        "Menyimpan informasi penting, dokumentasi API, rangkuman riset, atau pengetahuan domain ke dalam database memori semantik (PostgreSQL pgvector). " +
+        "Pengetahuan yang disimpan di sini tahan terhadap /newtopic dan dapat dicari kembali kapan saja berdasarkan makna menggunakan tool 'search_knowledge'.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "Judul atau topik pengetahuan (contoh: 'Dokumentasi Endpoint Payment Gateway', 'Arsitektur Server Produksi').",
+          },
+          content: {
+            type: "string",
+            description: "Isi lengkap pengetahuan/catatan yang ingin diindeks ke memori semantik.",
+          },
+        },
+        required: ["title", "content"],
       },
     },
   },

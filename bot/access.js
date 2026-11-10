@@ -36,16 +36,24 @@ function shouldIgnoreGroupMessage(msg, textContent) {
   );
 
   const BOT_USERNAME = ctx.botUsername;
-  const mention = `@${BOT_USERNAME}`;
+  const BOT_ID = ctx.botId;
   const isMentioned = Boolean(
-    textContent && textContent.toLowerCase().includes(mention.toLowerCase())
+    BOT_USERNAME &&
+    textContent &&
+    textContent.toLowerCase().includes(`@${BOT_USERNAME.toLowerCase()}`)
+  );
+
+  const replyFrom = msg.reply_to_message?.from;
+  const isReplyToBot = Boolean(
+    replyFrom && (
+      (BOT_ID && replyFrom.id === BOT_ID) ||
+      (BOT_USERNAME && replyFrom.username && replyFrom.username.toLowerCase() === BOT_USERNAME.toLowerCase())
+    )
   );
 
   // 1. Cek jika user me-reply pesan
   if (msg.reply_to_message) {
     const replyMsg = msg.reply_to_message;
-    const replyFrom = replyMsg.from;
-    const isReplyToBot = replyFrom?.is_bot || (replyFrom?.username && replyFrom.username.toLowerCase() === BOT_USERNAME.toLowerCase());
 
     // PENTING: Cek jika me-reply pesan pembuatan topik / service message topik (BUKAN percakapan sesama manusia)
     const isTopicCreationMsg = Boolean(
@@ -53,7 +61,7 @@ function shouldIgnoreGroupMessage(msg, textContent) {
       (msg.message_thread_id && replyMsg.message_id === msg.message_thread_id)
     );
 
-    // Jika me-reply sesama member manusia (bukan bot, bukan topic header):
+    // Jika me-reply sesama member manusia atau bot lain (bukan bot kita, bukan topic header):
     if (!isReplyToBot && !isTopicCreationMsg && !isMentioned) {
       return true; // Abaikan: sesama manusia sedang saling berdiskusi
     }
@@ -61,8 +69,7 @@ function shouldIgnoreGroupMessage(msg, textContent) {
 
   // 2. Di grup biasa / general chat tanpa forum topic, wajib tag bot atau reply bot
   if (!isForumTopic) {
-    const repliedToBot = msg.reply_to_message?.from?.username && msg.reply_to_message.from.username.toLowerCase() === BOT_USERNAME.toLowerCase();
-    if (!isMentioned && !repliedToBot) {
+    if (!isMentioned && !isReplyToBot) {
       return true;
     }
   }

@@ -68,19 +68,46 @@ test("describeArgsShape tidak membocorkan isi", () => {
 });
 
 test("browser: filename dan paths dialihkan ke workspace sesi (Opsi 2)", () => {
+  const fs = require("fs");
+  const { sessionWorkspacePath } = require("../lib/paths");
   const ctx = { sessionId: "user123" };
-  const ss = fixMcpArgs("browser_take_screenshot", { filename: "artifacts/test.png", scale: "css" }, ctx);
-  assert.ok(ss.args.filename.endsWith("/workspace/user123/artifacts/test.png"));
-  assert.equal(ss.args.scale, "css");
-  assert.equal(ss.fixes.length, 1);
+  try {
+    const ss = fixMcpArgs("browser_take_screenshot", { filename: "artifacts/test.png", scale: "css" }, ctx);
+    assert.ok(ss.args.filename.endsWith("/workspace/user123/artifacts/test.png"));
+    assert.equal(ss.args.scale, "css");
+    assert.equal(ss.fixes.length, 1);
 
-  const snap = fixMcpArgs("browser_snapshot", { filename: "mail-page.yml" }, ctx);
-  assert.ok(snap.args.filename.endsWith("/workspace/user123/mail-page.yml"));
+    const snap = fixMcpArgs("browser_snapshot", { filename: "mail-page.yml" }, ctx);
+    assert.ok(snap.args.filename.endsWith("/workspace/user123/mail-page.yml"));
 
-  const empty = fixMcpArgs("browser_take_screenshot", { filename: "", scale: "css" }, ctx);
-  assert.equal("filename" in empty.args, false);
+    const empty = fixMcpArgs("browser_take_screenshot", { filename: "", scale: "css" }, ctx);
+    assert.equal("filename" in empty.args, false);
 
-  const upload = fixMcpArgs("browser_file_upload", { paths: ["uploads/doc.pdf", "/workspace/uploads/pic.png"] }, ctx);
-  assert.ok(upload.args.paths[0].endsWith("/workspace/user123/uploads/doc.pdf"));
-  assert.ok(upload.args.paths[1].endsWith("/workspace/user123/uploads/pic.png"));
+    const upload = fixMcpArgs("browser_file_upload", { paths: ["uploads/doc.pdf", "/workspace/uploads/pic.png"] }, ctx);
+    assert.ok(upload.args.paths[0].endsWith("/workspace/user123/uploads/doc.pdf"));
+    assert.ok(upload.args.paths[1].endsWith("/workspace/user123/uploads/pic.png"));
+
+    // Path di luar workspace wajib ditolak
+    assert.throws(() => fixMcpArgs("browser_take_screenshot", { filename: "../../outside.png" }, ctx), /di luar workspace/i);
+    assert.throws(() => fixMcpArgs("browser_file_upload", { paths: ["../../outside.txt"] }, ctx), /di luar workspace/i);
+    assert.throws(() => fixMcpArgs("browser_file_upload", { paths: ["/opt/nroz/.env"] }, ctx), /di luar workspace/i);
+
+    // URL localhost/127.0.0.1 diarahkan otomatis ke IP container sandbox sesi jika tersedia
+    const nav = fixMcpArgs("browser_navigate", { url: "http://localhost:3000/dashboard?x=1" }, { sessionId: "user123", sandboxIp: "172.17.0.9" });
+    assert.equal(nav.args.url, "http://172.17.0.9:3000/dashboard?x=1");
+    assert.equal(nav.fixes.length, 1);
+
+    // Normalisasi target ref=f3e106 / [ref=e42] / { ref: "f3e106" } agar Playwright MCP tidak gagal Unknown engine "ref"
+    const click1 = fixMcpArgs("browser_click", { target: "ref=f3e106" }, ctx);
+    assert.equal(click1.args.target, "f3e106");
+    const click2 = fixMcpArgs("browser_click", { target: "[ref=e42]" }, ctx);
+    assert.equal(click2.args.target, "e42");
+    const click3 = fixMcpArgs("browser_click", { ref: "ref=e99" }, ctx);
+    assert.equal(click3.args.target, "e99");
+    assert.equal("ref" in click3.args, false);
+  } finally {
+    try {
+      fs.rmSync(sessionWorkspacePath("user123"), { recursive: true, force: true });
+    } catch (_) {}
+  }
 });

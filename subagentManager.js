@@ -8,6 +8,7 @@
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs");
+const { createChatCompletionWithRetry } = require("./bot/config");
 
 const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "run_command",
@@ -17,9 +18,13 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "file_write",
   "file_edit",
   "file_list",
+  "code_search",
+  "workspace_undo",
   "web_search",
   "read_url",
   "http_request",
+  "search_knowledge",
+  "save_knowledge",
   "read_skill",
   "save_skill",
   "browser_navigate",
@@ -32,6 +37,18 @@ const SUBAGENT_ALLOWED_TOOL_NAMES = new Set([
   "browser_close",
   "sequentialthinking",
   "sequential_thinking"
+]);
+
+const SUBAGENT_PARALLEL_SAFE_TOOLS = new Set([
+  "file_read",
+  "file_list",
+  "code_search",
+  "web_search",
+  "read_url",
+  "http_request",
+  "search_knowledge",
+  "read_skill",
+  "check_command_output"
 ]);
 
 /**
@@ -202,13 +219,17 @@ async function runSubagent({
 
     let res;
     try {
-      res = await activeClient.chat.completions.create({
-        model: activeModel,
-        messages: currentMessages,
-        tools: allowedTools,
-        tool_choice: "auto",
-        stream: false
-      });
+      res = await createChatCompletionWithRetry(
+        activeClient,
+        {
+          model: activeModel,
+          messages: currentMessages,
+          tools: allowedTools,
+          tool_choice: "auto",
+          stream: false
+        },
+        { maxAttempts: 3, baseDelayMs: 1500, label: `Subagent:${cleanRole}` }
+      );
     } catch (apiErr) {
       console.error(`[Subagent: ${cleanRole}] Gagal memanggil LLM pada langkah ${round}:`, apiErr.message);
       return {
@@ -238,8 +259,11 @@ async function runSubagent({
       tool_calls: toolCalls
     });
 
-    // Jalankan setiap tool call yang diminta subagent
-    for (const tc of toolCalls) {
+    // Jalankan tool calls (secara paralel jika semuanya tool baca/query independen)
+    const canRunParallel =
+      toolCalls.length > 1 && toolCalls.every((tc) => SUBAGENT_PARALLEL_SAFE_TOOLS.has(tc.function?.name));
+
+    const runSingleSubagentTool = async (tc) => {
       const fnName = tc.function?.name;
       let fnArgs = {};
       try {
@@ -248,14 +272,12 @@ async function runSubagent({
         fnArgs = {};
       }
 
-      // Pastikan subagent tidak memanggil tool di luar wewenangnya
       if (!SUBAGENT_ALLOWED_TOOL_NAMES.has(fnName)) {
-        currentMessages.push({
+        return {
           role: "tool",
           tool_call_id: tc.id,
           content: `❌ Akses ditolak: Subagent tidak memiliki izin memanggil tool '${fnName}'.`
-        });
-        continue;
+        };
       }
 
       console.log(`[Subagent: ${cleanRole}] Step ${round}/${safeMaxRounds} -> ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
@@ -274,16 +296,26 @@ async function runSubagent({
 
       let toolResult = "";
       try {
-        toolResult = await executeTool(fnName, fnArgs, { sessionId });
+        toolResult = await executeTool(fnName, fnArgs, { sessionId, client: activeClient, model: activeModel });
       } catch (execErr) {
         toolResult = `❌ Error saat menjalankan tool ${fnName}: ${execErr.message}`;
       }
 
-      currentMessages.push({
+      return {
         role: "tool",
         tool_call_id: tc.id,
         content: String(toolResult)
-      });
+      };
+    };
+
+    if (canRunParallel) {
+      const toolMessages = await Promise.all(toolCalls.map((tc) => runSingleSubagentTool(tc)));
+      currentMessages.push(...toolMessages);
+    } else {
+      for (const tc of toolCalls) {
+        const msgObj = await runSingleSubagentTool(tc);
+        currentMessages.push(msgObj);
+      }
     }
 
     // Pangkas output tool lama secara sliding window
@@ -319,8 +351,82 @@ async function runSubagent({
   };
 }
 
+const MAX_PARALLEL_SUBAGENTS = 4;
+
+/**
+ * Menjalankan beberapa Subagent sekaligus secara paralel (Swarm / Map-Reduce).
+ * @param {object} params
+ * @param {Array<{role: string, role_description?: string, task: string, max_rounds?: number}>} params.tasks
+ * @param {string} [params.sessionId="default"]
+ * @param {object} [params.client]
+ * @param {string} [params.model]
+ * @param {Function} [params.onProgress]
+ * @param {Function} params.executeTool
+ * @param {Array} params.allToolDefinitions
+ */
+async function runParallelSubagents({
+  tasks = [],
+  sessionId = "default",
+  client,
+  model,
+  onProgress,
+  executeTool,
+  allToolDefinitions = []
+}) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error("Parameter 'tasks' harus berupa array minimal 1 tugas subagent.");
+  }
+  if (tasks.length > MAX_PARALLEL_SUBAGENTS) {
+    throw new Error(`Maksimal ${MAX_PARALLEL_SUBAGENTS} subagent paralel dalam satu panggilan.`);
+  }
+
+  for (let i = 0; i < tasks.length; i++) {
+    const item = tasks[i];
+    if (!item || typeof item !== "object" || !item.task || !String(item.task).trim()) {
+      throw new Error(`Tugas subagent ke-${i + 1} wajib memiliki properti 'task' yang tidak kosong.`);
+    }
+  }
+
+  const settled = await Promise.allSettled(
+    tasks.map((item, idx) => {
+      const cleanRole = String(item.role || "general").trim();
+      const label = `${cleanRole}#${idx + 1}`;
+      return runSubagent({
+        role: cleanRole,
+        roleDescription: item.role_description || null,
+        task: String(item.task),
+        sessionId,
+        maxRounds: item.max_rounds || 10,
+        client,
+        model,
+        onProgress:
+          typeof onProgress === "function"
+            ? (prog) => onProgress({ ...prog, role: label })
+            : undefined,
+        executeTool,
+        allToolDefinitions
+      });
+    })
+  );
+
+  return settled.map((res, idx) => {
+    const cleanRole = String(tasks[idx]?.role || "general").trim();
+    if (res.status === "fulfilled") {
+      return res.value;
+    }
+    return {
+      success: false,
+      role: cleanRole,
+      report: `❌ Subagent ${cleanRole} gagal dieksekusi: ${res.reason?.message || res.reason}`,
+      roundsUsed: 0
+    };
+  });
+}
+
 module.exports = {
   runSubagent,
+  runParallelSubagents,
+  MAX_PARALLEL_SUBAGENTS,
   getSubagentSystemPrompt,
   SUBAGENT_ALLOWED_TOOL_NAMES
 };

@@ -23,7 +23,7 @@
  */
 
 const mcpManager = require("./mcpManager.js");
-const { runSubagent } = require("./subagentManager.js");
+const { runSubagent, runParallelSubagents } = require("./subagentManager.js");
 const { TOOL_DEFINITIONS } = require("./tools/definitions");
 const { describeToolCall } = require("./tools/describe");
 const shell = require("./tools/shell");
@@ -56,7 +56,7 @@ async function toolDelegateTask({ role, role_description, task, max_rounds, sess
       model,
       onProgress: onSubagentProgress,
       executeTool,
-      allToolDefinitions: TOOL_DEFINITIONS
+      allToolDefinitions: getAllToolDefinitions()
     });
 
     return (
@@ -65,6 +65,42 @@ async function toolDelegateTask({ role, role_description, task, max_rounds, sess
     );
   } catch (err) {
     return `❌ Gagal menjalankan subagent ${safeRole}: ${err.message}`;
+  }
+}
+
+/**
+ * Tool: delegate_parallel_tasks
+ * Menjalankan 2–4 subagent sekaligus secara paralel (Swarm / Map-Reduce).
+ */
+async function toolDelegateParallelTasks({ tasks, sessionId, client, model, onSubagentProgress }) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return "❌ Parameter 'tasks' wajib berupa array berisi minimal 1 objek { role, task }.";
+  }
+  try {
+    const results = await runParallelSubagents({
+      tasks,
+      sessionId: sessionId || "default",
+      client,
+      model,
+      onProgress: onSubagentProgress,
+      executeTool,
+      allToolDefinitions: getAllToolDefinitions()
+    });
+
+    const blocks = results.map((res, idx) => {
+      const icon = res.success !== false ? "🤖" : "⚠️";
+      return (
+        `${icon} **[Subagent #${idx + 1}: ${String(res.role || "general").toUpperCase()}]** (${res.roundsUsed} langkah):\n` +
+        `${res.report}`
+      );
+    });
+
+    return (
+      `⚡ **[Laporan Swarm Paralel: ${results.length} Subagent Selesai]**\n\n` +
+      blocks.join("\n\n---\n\n")
+    );
+  } catch (err) {
+    return `❌ Gagal menjalankan swarm subagent paralel: ${err.message}`;
   }
 }
 
@@ -84,12 +120,15 @@ const TOOL_HANDLERS = {
   file_write: files.toolFileWrite,
   file_edit: files.toolFileEdit,
   file_list: files.toolFileList,
+  code_search: files.toolCodeSearch,
+  workspace_undo: files.toolWorkspaceUndo,
   http_request: web.toolHttpRequest,
   start_web_preview: media.toolStartWebPreview,
   create_reminder: scheduling.toolCreateReminder,
   create_watchdog: scheduling.toolCreateWatchdog,
   schedule_agent_task: scheduling.toolScheduleAgentTask,
   search_knowledge: knowledge.toolSearchKnowledge,
+  save_knowledge: knowledge.toolSaveKnowledge,
   ask_user: ask.toolAskUser,
   analyze_video_reference: videoRef.toolAnalyzeVideoReference,
   media_download: media.toolMediaDownload,
@@ -99,6 +138,7 @@ const TOOL_HANDLERS = {
   update_project_context: memory.toolUpdateProjectContext,
   search_raw_memory: memory.toolSearchRawMemory,
   delegate_task: toolDelegateTask,
+  delegate_parallel_tasks: toolDelegateParallelTasks,
   send_photo: files.toolSendPhoto,
   send_file: files.toolSendFile,
   read_skill: skills.toolReadSkill,

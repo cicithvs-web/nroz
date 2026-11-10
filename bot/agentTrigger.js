@@ -65,10 +65,10 @@ async function runAgentTask({ sessionId, chatId, threadId = null, sourceLabel, p
       try {
         typing = startTyping(chatIdStr, threadId);
 
+        const history = await getHistoryForAI(sid, 12);
         await saveMemory(sid, "user", triggerText);
         appendRawLog(sid, "user", triggerText);
 
-        const history = await getHistoryForAI(sid, 12);
         const messages = buildMessagesWithSystem(history, sid);
         messages.push({ role: "user", content: triggerText });
 

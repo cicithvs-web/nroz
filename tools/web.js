@@ -148,9 +148,11 @@ async function toolHttpRequest({ method, url, headers, body }) {
     return "❌ URL harus dimulai dengan http:// atau https://";
   }
 
+  const upperMethod = String(method).trim().toUpperCase();
+
   try {
     const options = {
-      method: method.toUpperCase(),
+      method: upperMethod,
       headers: {
         "User-Agent": "NrozBot/1.0",
         ...(headers || {}),
@@ -158,8 +160,8 @@ async function toolHttpRequest({ method, url, headers, body }) {
       signal: AbortSignal.timeout(15_000),
     };
 
-    // Tambahkan body untuk POST/PUT
-    if (body && (method === "POST" || method === "PUT")) {
+    // Tambahkan body untuk POST/PUT/PATCH/DELETE
+    if (body && (upperMethod === "POST" || upperMethod === "PUT" || upperMethod === "PATCH" || upperMethod === "DELETE")) {
       options.body = body;
       // Set Content-Type default jika belum ada
       if (!options.headers["Content-Type"] && !options.headers["content-type"]) {
@@ -183,7 +185,7 @@ async function toolHttpRequest({ method, url, headers, body }) {
     });
 
     const result = [
-      `📡 ${method.toUpperCase()} ${url}`,
+      `📡 ${upperMethod} ${url}`,
       `Status: ${statusLine}`,
       `Content-Type: ${respHeaders["content-type"] || "(tidak ada)"}`,
       ``,

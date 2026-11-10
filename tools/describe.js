@@ -49,10 +49,18 @@ function describeToolCall(name, args = {}) {
       return `membaca ${oneLine(path.basename(args.path || ""), 40)}`;
     case "file_write":
       return `menulis ${oneLine(path.basename(args.path || ""), 40)} (${Buffer.byteLength(String(args.content || ""))} byte)`;
-    case "file_edit":
-      return `mengedit bagian ${oneLine(path.basename(args.path || ""), 40)}`;
+    case "file_edit": {
+      const count = Array.isArray(args.edits) ? ` (${args.edits.length} blok)` : "";
+      return `mengedit bagian ${oneLine(path.basename(args.path || ""), 40)}${count}`;
+    }
+    case "workspace_undo":
+      return args.action === "list"
+        ? "melihat riwayat snapshot undo"
+        : `membatalkan perubahan file ${args.path ? oneLine(path.basename(args.path), 30) : "terakhir"}`;
     case "file_list":
       return `daftar isi ${oneLine(args.path || ".", 40)}`;
+    case "code_search":
+      return `mencari kode "${oneLine(args.query, 45)}"${args.file_pattern ? ` (${oneLine(args.file_pattern, 15)})` : ""}`;
     case "system_info":
       return "mengecek kondisi server";
     case "start_web_preview":
@@ -65,7 +73,7 @@ function describeToolCall(name, args = {}) {
       return `menjadwalkan pengingat ${kapan}${ulang}: ${oneLine(args.message, 50)}`;
     }
     case "create_watchdog":
-      return `memantau ${oneLine(args.url, 60)}`;
+      return `memantau ${oneLine(args.url, 60)}${args.auto_heal_task ? " (self-healing)" : ""}`;
     case "schedule_agent_task": {
       const kapan = args.at
         ? `pada ${oneLine(args.at, 20)}`
@@ -75,6 +83,8 @@ function describeToolCall(name, args = {}) {
     }
     case "search_knowledge":
       return `mencari semantik "${oneLine(args.query, 50)}"${args.source ? ` di ${oneLine(args.source, 20)}` : ""}`;
+    case "save_knowledge":
+      return `menyimpan pengetahuan "${oneLine(args.title || "catatan", 45)}" ke memori semantik`;
     case "ask_user":
       return `bertanya ke user: "${oneLine(args.question, 60)}"${Array.isArray(args.options) && args.options.length ? ` (${args.options.length} opsi)` : ""}`;
     case "analyze_video_reference":
@@ -100,6 +110,11 @@ function describeToolCall(name, args = {}) {
       return `mencari arsip obrolan "${oneLine(args.query, 40)}"`;
     case "delegate_task":
       return `mendelegasikan ke subagent ${oneLine(args.role || "coder", 12)}: "${oneLine(args.task, 50)}"`;
+    case "delegate_parallel_tasks": {
+      const list = Array.isArray(args.tasks) ? args.tasks : [];
+      const roles = list.map((t) => oneLine(t?.role || "agent", 12)).join(", ");
+      return `menjalankan ${list.length} subagent paralel (${roles || "swarm"})`;
+    }
     case "send_photo":
       return `mengirim foto ${oneLine(path.basename(args.file_path || ""), 30)} ke Telegram`;
     case "send_file":

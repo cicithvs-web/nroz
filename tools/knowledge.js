@@ -29,4 +29,34 @@ async function toolSearchKnowledge({ query, source, limit, sessionId }) {
     knowledge.formatResults(results);
 }
 
-module.exports = { toolSearchKnowledge };
+/**
+ * Tool: save_knowledge
+ * Menyimpan informasi penting, dokumentasi teknis, hasil riset, atau catatan arsitektur
+ * ke dalam memori semantik jangka panjang (PostgreSQL pgvector) agar dapat dicari kembali lewat search_knowledge.
+ */
+async function toolSaveKnowledge({ title, content, sessionId }) {
+  if (!content || typeof content !== "string" || !content.trim()) {
+    return "❌ Parameter 'content' (isi pengetahuan yang ingin disimpan) wajib diisi.";
+  }
+  const cleanTitle = String(title || "catatan").trim().slice(0, 80);
+  const slug = cleanTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "catatan";
+  const sourceLabel = `note:${slug}`;
+  const fullText = `[Judul: ${cleanTitle}]\n${content.trim()}`;
+
+  const res = await knowledge.ingestText(sessionId || "default", sourceLabel, fullText);
+  if (res.skipped && !res.stored) {
+    return `⚠️ Gagal menyimpan ke memori semantik (pgvector): ${res.skipped}`;
+  }
+  return (
+    `🧠 Pengetahuan "${cleanTitle}" berhasil diindeks ke memori semantik (pgvector)!\n` +
+    `• Sumber: ${sourceLabel}\n` +
+    `• Potongan tersimpan: ${res.stored} chunk` +
+    (res.skipped ? ` (catatan: ${res.skipped})` : "") +
+    `\nPengetahuan ini bersifat permanen lintas topik dan dapat dicari kapan saja menggunakan tool 'search_knowledge'.`
+  );
+}
+
+module.exports = { toolSearchKnowledge, toolSaveKnowledge };

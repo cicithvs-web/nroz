@@ -10,7 +10,7 @@ const { getAllToolDefinitions, executeTool, describeToolCall } = require("../age
 const { saveMemory } = require("../dbHelper.js");
 const { appendRawLog, saveTurnCheckpoint, clearTurnCheckpoint } = require("../workspaceMemoryManager.js");
 const ctx = require("./context");
-const { getClient, getConfig } = require("./config");
+const { getClient, getConfig, createChatCompletionWithRetry } = require("./config");
 const { cleanAnswer, cleanFileTags, cleanDraftPreview } = require("./text");
 const { sendLongMessage, getSendOptions, replyText, sendDraft, stopTyping } = require("./send");
 const { handleGeneratedFiles } = require("./fileDelivery");
@@ -20,6 +20,21 @@ const { isDraftStreaming } = require("./terminalStream");
 
 // Sesi AI yang sedang berjalan (untuk /stop): sessionId -> { cancelled: boolean }
 const activeTurnSessions = new Map();
+
+/** Tool baca/query independen yang aman dijalankan serentak (Promise.all) dalam satu langkah. */
+const PARALLEL_SAFE_TOOLS = new Set([
+  "file_read",
+  "file_list",
+  "code_search",
+  "web_search",
+  "read_url",
+  "http_request",
+  "search_knowledge",
+  "search_raw_memory",
+  "system_info",
+  "read_skill",
+  "check_command_output"
+]);
 
 /**
  * Memangkas output tool lama (sliding window) agar context window tidak membengkak
@@ -169,16 +184,20 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
         console.warn(`[Stream AI] Streaming gagal: ${streamErr.message}`);
       }
 
-      // 2. Fallback non-streaming jika stream gagal
+      // 2. Fallback non-streaming jika stream gagal (dilengkapi Auto-Retry Exponential Backoff)
       if (!isStreamSuccess) {
         try {
-          const fallbackRes = await client.chat.completions.create({
-            model,
-            messages: currentMessages,
-            tools: getAllToolDefinitions(),
-            tool_choice: "auto",
-            stream: false
-          });
+          const fallbackRes = await createChatCompletionWithRetry(
+            client,
+            {
+              model,
+              messages: currentMessages,
+              tools: getAllToolDefinitions(),
+              tool_choice: "auto",
+              stream: false
+            },
+            { maxAttempts: 3, baseDelayMs: 1500, label: "AI Fallback" }
+          );
           const choice = fallbackRes.choices[0];
           assistantContent = choice.message?.content || "";
           toolCalls = choice.message?.tool_calls || [];
@@ -207,59 +226,106 @@ async function executeAICompletionAndReply({ msg, sessionId, messages, userPromp
       const assistantMsg = { role: "assistant", content: assistantContent || null, tool_calls: toolCalls };
       currentMessages.push(assistantMsg);
 
-      for (const toolCall of toolCalls) {
-        const fnName = toolCall.function?.name;
-        let fnArgs = {};
-        try {
-          fnArgs = JSON.parse(toolCall.function?.arguments || "{}");
-        } catch {
-          fnArgs = {};
-        }
-
-        stepIndex++;
-        const langkah = describeToolCall(fnName, fnArgs);
-        if (isPrivate) {
-          const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
-            ? `Sedang ${langkah}...`
-            : `Sedang melakukan ${langkah}...`;
-          await draftToChat(turnDraftId, actionText, msg.message_thread_id);
-        }
-
-        console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
-        const result = await executeTool(fnName, fnArgs, {
-          sessionId,
-          chatId,
-          threadId: msg.message_thread_id,
-          client,
-          model,
-          bot: ctx.bot,
-          onMediaSent: (type) => {
-            if (type === "photo") turnMediaSent.photos++;
-            if (type === "file") turnMediaSent.files++;
-          },
-          onSubagentProgress: async ({ role, tool, args }) => {
-            if (isPrivate) {
-              await draftToChat(
-                turnDraftId,
-                `Subagent (${role}): sedang ${describeToolCall(tool, args)}...`,
-                msg.message_thread_id
-              );
-            }
+      const toolCtx = {
+        sessionId,
+        chatId,
+        threadId: msg.message_thread_id,
+        client,
+        model,
+        bot: ctx.bot,
+        onMediaSent: (type) => {
+          if (type === "photo") turnMediaSent.photos++;
+          if (type === "file") turnMediaSent.files++;
+        },
+        onSubagentProgress: async ({ role, tool, args }) => {
+          if (isPrivate) {
+            await draftToChat(
+              turnDraftId,
+              `Subagent (${role}): sedang ${describeToolCall(tool, args)}...`,
+              msg.message_thread_id
+            );
           }
-        });
-        console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
+        }
+      };
 
-        const ok = !isFailedResult(result);
-        const ringkas = firstResultLine(result);
-        steps.push({ n: stepIndex, desc: langkah.slice(0, 140), ok, result: ringkas });
+      const canRunParallel =
+        toolCalls.length > 1 && toolCalls.every((tc) => PARALLEL_SAFE_TOOLS.has(tc.function?.name));
+
+      if (canRunParallel) {
+        const prepared = toolCalls.map((toolCall) => {
+          const fnName = toolCall.function?.name;
+          let fnArgs = {};
+          try {
+            fnArgs = JSON.parse(toolCall.function?.arguments || "{}");
+          } catch {
+            fnArgs = {};
+          }
+          stepIndex++;
+          const langkah = describeToolCall(fnName, fnArgs);
+          return { toolCall, fnName, fnArgs, stepNo: stepIndex, langkah };
+        });
 
         if (isPrivate) {
-          const prefix = ok ? "Selesai: " : "Gagal: ";
-          const draftDetail = ringkas ? `${prefix}${langkah} (${ringkas.slice(0, 70)})` : `${prefix}${langkah}...`;
-          await draftToChat(turnDraftId, draftDetail, msg.message_thread_id);
+          const ringkasanParalel = prepared.map((p) => p.langkah).join(" · ").slice(0, 220);
+          await draftToChat(
+            turnDraftId,
+            `⚡ Menjalankan ${prepared.length} tool secara paralel: ${ringkasanParalel}...`,
+            msg.message_thread_id
+          );
         }
 
-        currentMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+        const results = await Promise.all(
+          prepared.map(async (item) => {
+            console.log(`[Agent Tool Parallel] Executing: ${item.fnName}(${JSON.stringify(item.fnArgs).slice(0, 200)})`);
+            const res = await executeTool(item.fnName, item.fnArgs, toolCtx);
+            console.log(`[Agent Tool Parallel] Result (${item.fnName}): ${res.slice(0, 200)}...`);
+            return res;
+          })
+        );
+
+        for (let i = 0; i < prepared.length; i++) {
+          const item = prepared[i];
+          const result = results[i];
+          const ok = !isFailedResult(result);
+          const ringkas = firstResultLine(result);
+          steps.push({ n: item.stepNo, desc: item.langkah.slice(0, 140), ok, result: ringkas });
+          currentMessages.push({ role: "tool", tool_call_id: item.toolCall.id, content: result });
+        }
+      } else {
+        for (const toolCall of toolCalls) {
+          const fnName = toolCall.function?.name;
+          let fnArgs = {};
+          try {
+            fnArgs = JSON.parse(toolCall.function?.arguments || "{}");
+          } catch {
+            fnArgs = {};
+          }
+
+          stepIndex++;
+          const langkah = describeToolCall(fnName, fnArgs);
+          if (isPrivate) {
+            const actionText = langkah.startsWith("men") || langkah.startsWith("mem") || langkah.startsWith("ber")
+              ? `Sedang ${langkah}...`
+              : `Sedang melakukan ${langkah}...`;
+            await draftToChat(turnDraftId, actionText, msg.message_thread_id);
+          }
+
+          console.log(`[Agent Tool] Executing: ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
+          const result = await executeTool(fnName, fnArgs, toolCtx);
+          console.log(`[Agent Tool] Result (${fnName}): ${result.slice(0, 200)}...`);
+
+          const ok = !isFailedResult(result);
+          const ringkas = firstResultLine(result);
+          steps.push({ n: stepIndex, desc: langkah.slice(0, 140), ok, result: ringkas });
+
+          if (isPrivate) {
+            const prefix = ok ? "Selesai: " : "Gagal: ";
+            const draftDetail = ringkas ? `${prefix}${langkah} (${ringkas.slice(0, 70)})` : `${prefix}${langkah}...`;
+            await draftToChat(turnDraftId, draftDetail, msg.message_thread_id);
+          }
+
+          currentMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+        }
       }
 
       pruneToolOutputsSlidingWindow(currentMessages, 8);

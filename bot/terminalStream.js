@@ -225,6 +225,8 @@ async function pushSession(session, state, exitCode = null) {
       await bot.editMessageText(text, {
         chat_id: session.chatId,
         message_id: session.messageId,
+        parse_mode: "Markdown",
+        reply_markup: terminalKeyboard(session.jobId),
         ...(session.threadId ? { message_thread_id: session.threadId } : {})
       });
     } catch (err) {
@@ -234,6 +236,7 @@ async function pushSession(session, state, exitCode = null) {
           await bot.editMessageText(text.replace(/[*_`]/g, ""), {
             chat_id: session.chatId,
             message_id: session.messageId,
+            reply_markup: terminalKeyboard(session.jobId),
             ...(session.threadId ? { message_thread_id: session.threadId } : {})
           });
         } catch (_) { /* biarkan push berikutnya mencoba lagi */ }

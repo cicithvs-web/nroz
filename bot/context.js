@@ -8,6 +8,7 @@
 const ctx = {
   /** @type {import("node-telegram-bot-api")} */
   bot: null,
+  botId: null,
   botUsername: "NrozBot"
 };
 

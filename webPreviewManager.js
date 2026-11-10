@@ -8,6 +8,26 @@ const net = require("net");
 const { getSandboxIP } = require("./sandboxManager.js");
 
 const activeTunnels = new Map(); // key -> { process, url, port, targetHost, startedAt, timer }
+const MAX_TIMEOUT_MS = 2_147_483_647; // Batas maksimum signed 32-bit int pada setTimeout Node.js (~24,85 hari)
+
+function setLongTimeout(fn, delayMs) {
+  const handle = { timer: null };
+  const step = (remaining) => {
+    if (remaining <= MAX_TIMEOUT_MS) {
+      handle.timer = setTimeout(fn, Math.max(1, remaining));
+    } else {
+      handle.timer = setTimeout(() => step(remaining - MAX_TIMEOUT_MS), MAX_TIMEOUT_MS);
+    }
+  };
+  step(delayMs);
+  return handle;
+}
+
+function clearLongTimeout(handle) {
+  if (!handle) return;
+  if (handle.timer) clearTimeout(handle.timer);
+  else clearTimeout(handle);
+}
 
 /**
  * Memeriksa apakah port pada host tertentu terbuka dan menerima koneksi TCP.
@@ -113,7 +133,7 @@ async function startWebPreview(port, durationMinutes = 30, options = {}) {
         clearTimeout(timeout);
         const urlFound = match[0];
 
-        const timer = setTimeout(() => {
+        const timer = setLongTimeout(() => {
           stopWebPreview(p, targetHost);
         }, durationMinutes * 60 * 1000);
 
@@ -143,6 +163,8 @@ async function startWebPreview(port, durationMinutes = 30, options = {}) {
     });
 
     tunnel.on("exit", () => {
+      const cur = activeTunnels.get(key);
+      if (cur && cur.timer) clearLongTimeout(cur.timer);
       activeTunnels.delete(key);
     });
   });
@@ -153,7 +175,7 @@ function stopWebPreview(port, targetHost = null) {
   let stopped = false;
   for (const [k, item] of Array.from(activeTunnels.entries())) {
     if (item.port === p && (!targetHost || item.targetHost === targetHost)) {
-      clearTimeout(item.timer);
+      clearLongTimeout(item.timer);
       try {
         item.process.kill("SIGTERM");
       } catch (_) {}
@@ -162,6 +184,12 @@ function stopWebPreview(port, targetHost = null) {
     }
   }
   return stopped;
+}
+
+function isWebPreviewActive(port, targetHost = "127.0.0.1") {
+  const key = `${targetHost}:${Number(port)}`;
+  const item = activeTunnels.get(key);
+  return Boolean(item && item.process && !item.process.killed);
 }
 
 function listActivePreviews() {
@@ -188,6 +216,7 @@ process.on("exit", () => {
 module.exports = {
   startWebPreview,
   stopWebPreview,
+  isWebPreviewActive,
   listActivePreviews,
   _resolveTargetHost: resolveTargetHost
 };

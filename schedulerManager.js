@@ -360,17 +360,44 @@ async function checkWatchdogs(now = Date.now()) {
 
       if (isDown && !w.isCurrentlyDown) {
         w.isCurrentlyDown = true;
+        const healNote = w.autoHealTask
+          ? `\n🔧 *Self-Healing Aktif:* Agent sedang otomatis mendiagnosis & memperbaiki layanan ini...`
+          : `\nBot akan memberitahukanmu kembali saat website kembali normal.`;
         try {
           await sendWithFallback(
             w.chatId,
             `🚨 *PERINGATAN SERVER / WEBSITE DOWN!*\n\n` +
               `• Target: ${w.url}\n` +
               `• Masalah: \`${String(errorDetail).replace(/`/g, "'")}\`\n` +
-              `• Waktu terdeteksi: ${formatInZone(now)}\n\n` +
-              `Bot akan memberitahukanmu kembali saat website kembali normal.`,
+              `• Waktu terdeteksi: ${formatInZone(now)}\n` +
+              healNote,
             targetOpts(w)
           );
         } catch (_) {}
+
+        if (w.autoHealTask) {
+          try {
+            const { runAgentTask } = require("./bot/agentTrigger.js");
+            const healPrompt =
+              `[SELF-HEALING WATCHDOG ALERT]\n` +
+              `URL yang dipantau mengalami DOWN/ERROR!\n` +
+              `• URL Target: ${w.url}\n` +
+              `• Error/Status: ${errorDetail}\n` +
+              `• Waktu Terdeteksi: ${formatInZone(now)}\n\n` +
+              `Instruksi Perbaikan Otomatis (Self-Healing):\n${w.autoHealTask}\n\n` +
+              `Segera periksa kondisi layanan/server terkait, jalankan langkah perbaikan yang diinstruksikan, verifikasi kembali apakah URL sudah merespons normal, lalu laporkan hasil perbaikannya ke user.`;
+            runAgentTask({
+              sessionId: w.sessionId,
+              chatId: w.chatId,
+              threadId: w.threadId,
+              sourceLabel: "Self-Healing Watchdog",
+              prompt: healPrompt,
+              notify: false
+            }).catch((err) => console.error(`[Watchdog Auto-Heal] Gagal menjalankan self-healing ${w.id}:`, err.message));
+          } catch (err) {
+            console.error(`[Watchdog Auto-Heal] Error pemicu self-healing:`, err.message);
+          }
+        }
       } else if (!isDown && w.isCurrentlyDown) {
         w.isCurrentlyDown = false;
         try {
@@ -475,15 +502,20 @@ function addReminder({ sessionId, chatId, threadId = null, message, targetTime, 
 /**
  * Menambahkan watchdog. URL ke alamat internal (localhost, IP privat, metadata cloud) ditolak.
  */
-async function addWatchdog({ sessionId, chatId, threadId = null, url, intervalMinutes = 10 }) {
+async function addWatchdog({ sessionId, chatId, threadId = null, url, intervalMinutes = 10, autoHealTask = null }) {
   const cleanUrl = String(url).trim();
   await assertPublicUrl(cleanUrl);
   const sid = String(sessionId ?? chatId);
   const interval = Math.max(1, Number(intervalMinutes) || 10);
+  const cleanHeal =
+    autoHealTask && String(autoHealTask).trim()
+      ? String(autoHealTask).trim().slice(0, MAX_AGENT_TASK_LEN)
+      : null;
 
   const existing = watchdogs.find((w) => w.sessionId === sid && w.url === cleanUrl);
   if (existing) {
     existing.intervalMinutes = interval;
+    if (autoHealTask !== undefined) existing.autoHealTask = cleanHeal;
     saveData();
     return existing;
   }
@@ -495,6 +527,7 @@ async function addWatchdog({ sessionId, chatId, threadId = null, url, intervalMi
     threadId: threadId ?? null,
     url: cleanUrl,
     intervalMinutes: interval,
+    autoHealTask: cleanHeal,
     lastChecked: 0,
     isCurrentlyDown: false,
     createdAt: Date.now()
@@ -592,5 +625,6 @@ module.exports = {
   getZonedParts,
   splitSessionId,
   checkReminders,
+  checkWatchdogs,
   _reloadForTests: loadData
 };
