@@ -9,16 +9,51 @@
 const ctx = require("./context");
 const { splitMessage, hasMarkdownTable, isParseError, isTooLongError, MESSAGE_LIMIT } = require("./text");
 
-/** sendMessage dengan fallback: Markdown gagal -> teks biasa; terlalu panjang -> dipecah. */
+function isTransientTelegramNetworkError(err) {
+  const msg = String(err?.message || err || "");
+  const code = String(err?.code || err?.cause?.code || "");
+  if (/429|Too Many Requests|retry after/i.test(msg)) return true;
+  if (/ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|ESOCKETTIMEDOUT|ECONNREFUSED|socket hang up|network/i.test(msg)) {
+    return true;
+  }
+  if (/ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|ESOCKETTIMEDOUT|EFATAL/i.test(code)) {
+    return true;
+  }
+  return false;
+}
+
+async function callTelegramWithRetry(fn, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxAttempts || !isTransientTelegramNetworkError(err)) {
+        throw err;
+      }
+      const msg = String(err?.message || "");
+      const retryMatch = msg.match(/retry after (\d+)/i);
+      const delayMs = retryMatch ? (parseInt(retryMatch[1], 10) + 1) * 1000 : 800 * Math.pow(2, attempt - 1);
+      console.warn(
+        `[Telegram Send Retry] Percobaan ${attempt}/${maxAttempts} gagal (${msg.slice(0, 100)}); ulang dalam ${delayMs}ms...`
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/** sendMessage dengan fallback: jaringan kedip -> auto-retry; Markdown gagal -> teks biasa; terlalu panjang -> dipecah. */
 async function sendMessageSafe(chatId, text, options = {}) {
   try {
-    return await ctx.bot.sendMessage(chatId, text, options);
+    return await callTelegramWithRetry(() => ctx.bot.sendMessage(chatId, text, options));
   } catch (err) {
     if (isParseError(err) && options.parse_mode) {
       console.warn("[Send] Markdown ditolak Telegram, kirim ulang sebagai teks biasa:", err.message);
       const plain = { ...options };
       delete plain.parse_mode;
-      return await ctx.bot.sendMessage(chatId, text, plain);
+      return await callTelegramWithRetry(() => ctx.bot.sendMessage(chatId, text, plain));
     }
     if (isTooLongError(err) && text.length > 1000) {
       let last;

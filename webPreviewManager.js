@@ -214,6 +214,7 @@ process.on("exit", () => {
 });
 
 module.exports = {
+  checkPortOpen,
   startWebPreview,
   stopWebPreview,
   isWebPreviewActive,

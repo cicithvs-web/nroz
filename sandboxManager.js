@@ -120,6 +120,7 @@ function ensureSandbox(sessionId) {
       ensureSandboxImage();
       execSync(
         `docker run -d ` +
+        `--init ` +
         `--name ${containerName} ` +
         `--restart unless-stopped ` +
         `--memory 2048m ` +

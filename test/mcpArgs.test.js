@@ -105,6 +105,8 @@ test("browser: filename dan paths dialihkan ke workspace sesi (Opsi 2)", () => {
     const click3 = fixMcpArgs("browser_click", { ref: "ref=e99" }, ctx);
     assert.equal(click3.args.target, "e99");
     assert.equal("ref" in click3.args, false);
+    const click4 = fixMcpArgs("browser_click", { target: 'button "Masuk" [ref=f3e106]' }, ctx);
+    assert.equal(click4.args.target, "f3e106");
   } finally {
     try {
       fs.rmSync(sessionWorkspacePath("user123"), { recursive: true, force: true });

@@ -29,6 +29,12 @@ const { listTasks, removeTask, formatInZone, REPEAT_LABEL } = require("../schedu
 const skillsManager = require("../skillsManager.js");
 const webhookManager = require("../webhookManager.js");
 const { cancelPendingAsks } = require("../tools/ask");
+const {
+  startDesktopTunnel,
+  stopDesktopTunnel,
+  captureDesktopScreenshot,
+  getDesktopStatus
+} = require("../desktopManager.js");
 
 /** URL tunnel webhook yang sedang aktif (diset /webhookurl). */
 let tunnelUrlCache = null;
@@ -43,6 +49,8 @@ const PUBLIC_COMMANDS = [
   { command: "stop", description: "Hentikan pekerjaan AI yang sedang berjalan" },
   { command: "tasks", description: "Lihat & batalkan pengingat dan pemantau web" },
   { command: "workspace", description: "Daftar file di workspace kamu" },
+  { command: "desktop", description: "🖥️ Buka Layar Komputer Virtual (Live Web Desktop)" },
+  { command: "stopdesktop", description: "🛑 Tutup link publik Live Desktop" },
   { command: "sandbox", description: "Status container sandbox Docker kamu" },
   { command: "resetsandbox", description: "Reset container sandbox jika error" },
   { command: "summary", description: "Ringkasan memori percakapan" },
@@ -926,6 +934,75 @@ Kembalikan ke pengaturan awal dari .env`;
     } catch (err) {
       await replyText(msg, `❌ Gagal membuka tunnel: ${err.message}`);
     }
+  });
+
+  // --- PERINTAH: BUKA LIVE VIRTUAL DESKTOP (noVNC) ---
+  bot.onText(/^\/desktop(?:@\w+)?(?:\s+(\d+))?$/, async (msg, match) => {
+    if (msg.from && msg.from.is_bot) return;
+    const access = await checkUserAccess(msg);
+    if (!access.allowed) return handleAccessDenied(msg, access.status);
+
+    const duration = Math.min(Math.max(Number(match[1]) || 120, 5), 1440);
+    await replyText(msg, "🖥️ Menyiapkan Layar Komputer Virtual & membuka Link Live Desktop...");
+    try {
+      const tunnel = await startDesktopTunnel(duration);
+      const status = await getDesktopStatus();
+      const shot = await captureDesktopScreenshot({ withGrid: false });
+      const tabText =
+        status.tabs.length > 0
+          ? status.tabs
+              .slice(0, 6)
+              .map((t) => `• ${t.index}. ${t.title} — ${t.url}`)
+              .join("\n")
+          : "• (Belum ada halaman web dibuka)";
+
+      const caption =
+        `🖥️ *Komputer Virtual GUI Aktif!*\n\n` +
+        `• Resolusi: \`${status.resolution}\`\n` +
+        `• Durasi Link: ${duration} menit\n` +
+        `• 🔗 *Link Live Desktop (HP/Laptop):*\n${tunnel.url}\n\n` +
+        `🌐 *Tab Browser Terbuka (${status.tabs.length}):*\n${tabText}\n\n` +
+        `_Klik tombol di bawah untuk menonton layar secara live atau ikut mengklik/mengetik langsung di komputer bersama AI. Ketik /stopdesktop untuk menutup link publik._`;
+
+      const sendOpts = {
+        caption: caption.slice(0, 1020),
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [[{ text: "🖥️ Buka Layar Komputer (Live)", url: tunnel.url }]]
+        }
+      };
+      if (msg.message_thread_id) sendOpts.message_thread_id = msg.message_thread_id;
+
+      try {
+        await bot.sendPhoto(msg.chat.id, shot.rawBuffer, sendOpts, {
+          filename: "desktop.png",
+          contentType: "image/png"
+        });
+      } catch (_) {
+        delete sendOpts.parse_mode;
+        await bot.sendPhoto(msg.chat.id, shot.rawBuffer, sendOpts, {
+          filename: "desktop.png",
+          contentType: "image/png"
+        });
+      }
+    } catch (err) {
+      await replyText(msg, `❌ Gagal menyalakan Live Desktop: ${err.message}`);
+    }
+  });
+
+  // --- PERINTAH: TUTUP LINK TUNNEL LIVE DESKTOP ---
+  bot.onText(/^\/stopdesktop(?:@\w+)?$/, async (msg) => {
+    if (msg.from && msg.from.is_bot) return;
+    const access = await checkUserAccess(msg);
+    if (!access.allowed) return handleAccessDenied(msg, access.status);
+
+    const stopped = stopDesktopTunnel();
+    await replyText(
+      msg,
+      stopped
+        ? "🛑 Link publik Live Desktop telah ditutup. (Komputer & tab browser tetap hidup di latar belakang)."
+        : "ℹ️ Tidak ada link publik Live Desktop yang sedang terbuka."
+    );
   });
 }
 

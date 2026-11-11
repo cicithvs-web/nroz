@@ -288,6 +288,41 @@ test("code_search, instant syntax checker pada file_write, dan createChatComplet
     } finally {
       updateConfig({ fallbackModels: prevFallbacks });
     }
+
+    // 6. computer_use (Virtual Desktop 1280x720): move mouse, list_tabs, screenshot
+    const moveRes = await executeTool("computer_use", { action: "move", x: 500, y: 300 }, ctx);
+    assert.match(moveRes, /\(500, 300\)/);
+    const shotRes = await executeTool(
+      "computer_use",
+      { action: "screenshot", send_to_chat: false, analyze_visual: false },
+      ctx
+    );
+    assert.match(shotRes, /Screenshot layar komputer berhasil diambil/);
+    assert.match(shotRes, /1280x720/);
+
+    // 7. sendMessageSafe auto-retry saat jaringan ke Telegram kedip (ETIMEDOUT)
+    const botCtx = require("../bot/context");
+    const { sendMessageSafe } = require("../bot/send");
+    const prevBot = botCtx.bot;
+    let sendCalls = 0;
+    botCtx.bot = {
+      sendMessage: async (chatId, text) => {
+        sendCalls++;
+        if (sendCalls === 1) {
+          const err = new Error("EFATAL: Error: read ETIMEDOUT");
+          err.code = "ETIMEDOUT";
+          throw err;
+        }
+        return { message_id: 99, chat: { id: chatId }, text };
+      }
+    };
+    try {
+      const sent = await sendMessageSafe(123, "Tes anti kedip");
+      assert.equal(sendCalls, 2);
+      assert.equal(sent.message_id, 99);
+    } finally {
+      botCtx.bot = prevBot;
+    }
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

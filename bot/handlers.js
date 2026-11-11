@@ -26,7 +26,7 @@ const { transcribeAudio } = require("../voiceManager.js");
 const { resolveInWorkspace } = require("../lib/pathGuard");
 const { isOwner } = require("./config");
 const { handleRestore } = require("./dbBackup");
-const { takePendingAskAnswer } = require("../tools/ask");
+const { takePendingAskAnswer, takePendingAskMedia, pendingAskCount } = require("../tools/ask");
 const { ingestFileBuffer, ingestChatMessage } = require("./knowledge");
 
 /**
@@ -134,6 +134,35 @@ function registerHandlers(bot) {
 
     const sessionId = getSessionId(msg);
 
+    // Jika sedang ada ask_user yang menunggu di sesi ini, tangkap kiriman foto langsung
+    // tanpa masuk runQueued (agar tidak deadlock dengan giliran AI yang sedang pause).
+    if (pendingAskCount(sessionId) > 0) {
+      try {
+        const photo = msg.photo[msg.photo.length - 1];
+        const file = await bot.getFile(photo.file_id);
+        const telegramUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await axios.get(telegramUrl, { responseType: "arraybuffer" });
+        const bufferData = Buffer.from(response.data);
+        const ws = ensureWorkspaceStructure(sessionId);
+        const photoName = `photo_${Date.now()}.jpg`;
+        const savedFilePath = path.join(ws.uploadsDir, photoName);
+        writeUploadSafely(sessionId, savedFilePath, bufferData);
+        if (
+          takePendingAskMedia(sessionId, {
+            type: "photo",
+            fileName: photoName,
+            savedFilePath,
+            sandboxPath: `/workspace/uploads/${photoName}`,
+            caption: (msg.caption || "").trim()
+          })
+        ) {
+          return;
+        }
+      } catch (err) {
+        console.warn("[AskUser Photo Intercept] Gagal memproses foto jawaban:", err.message);
+      }
+    }
+
     // Jika topik / chat sedang di-pause, bot diam
     if (await isChatPaused(sessionId)) {
       return;
@@ -225,6 +254,35 @@ function registerHandlers(bot) {
     }
 
     const sessionId = getSessionId(msg);
+
+    // Jika sedang ada ask_user yang menunggu di sesi ini, tangkap kiriman dokumen/file langsung
+    // tanpa masuk runQueued (agar tidak deadlock dengan giliran AI yang sedang pause).
+    if (pendingAskCount(sessionId) > 0) {
+      try {
+        const file = await bot.getFile(msg.document.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
+        const bufferData = Buffer.from(response.data);
+        const rawFileName = msg.document.file_name || `file_${Date.now()}`;
+        const safeName = sanitizePath(rawFileName).replace(/[\/\\]/g, "_") || `file_${Date.now()}`;
+        const ws = ensureWorkspaceStructure(sessionId);
+        const savedFilePath = path.join(ws.uploadsDir, safeName);
+        writeUploadSafely(sessionId, savedFilePath, bufferData);
+        if (
+          takePendingAskMedia(sessionId, {
+            type: "document",
+            fileName: safeName,
+            savedFilePath,
+            sandboxPath: `/workspace/uploads/${safeName}`,
+            caption: (msg.caption || "").trim()
+          })
+        ) {
+          return;
+        }
+      } catch (err) {
+        console.warn("[AskUser Document Intercept] Gagal memproses file jawaban:", err.message);
+      }
+    }
 
     // Jika topik / chat sedang di-pause, bot diam
     if (await isChatPaused(sessionId)) {
@@ -448,6 +506,27 @@ function registerHandlers(bot) {
 
     const mediaObj = isVoice ? msg.voice : msg.audio;
     if (!mediaObj || !mediaObj.file_id) return;
+
+    // Jika sedang ada ask_user yang menunggu di sesi ini, transkripsi langsung dan jadikan jawaban ask_user
+    if (pendingAskCount(sessionId) > 0) {
+      try {
+        const file = await bot.getFile(mediaObj.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
+        const bufferData = Buffer.from(response.data);
+        const ws = ensureWorkspaceStructure(sessionId);
+        const ext = path.extname(file.file_path) || (isVoice ? ".oga" : ".mp3");
+        const audioFileName = `audio_${Date.now()}${ext}`;
+        const savedAudioPath = path.join(ws.uploadsDir, audioFileName);
+        writeUploadSafely(sessionId, savedAudioPath, bufferData);
+        const transcribedText = await transcribeAudio(savedAudioPath);
+        if (transcribedText && transcribedText.trim() && takePendingAskAnswer(sessionId, transcribedText.trim())) {
+          return;
+        }
+      } catch (err) {
+        console.warn("[AskUser Voice Intercept] Gagal memproses voice jawaban:", err.message);
+      }
+    }
 
     const chatId = msg.chat.id;
     await runQueued(msg, sessionId, async () => {

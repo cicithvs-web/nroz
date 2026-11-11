@@ -91,10 +91,20 @@ function restoreFromFile(filePath, user, db) {
   });
 }
 
-/** Bungkus db.sql + folder workspace/ jadi satu .tar.gz. Kode 1 dari tar (file berubah saat dibaca) dianggap sukses. */
+/** Bungkus db.sql + folder workspace/ + file state JSON (scheduler_data.json, webhooks.json, config.json) jadi satu .tar.gz. */
 function tarFullBackup(outPath, stagingDir) {
   return new Promise((resolve, reject) => {
-    const child = spawn("tar", ["-czf", outPath, "-C", stagingDir, "db.sql", "-C", ROOT_DIR, "workspace"]);
+    for (const extraFile of ["scheduler_data.json", "webhooks.json", "config.json"]) {
+      const src = path.join(ROOT_DIR, extraFile);
+      if (fs.existsSync(src)) {
+        try {
+          fs.copyFileSync(src, path.join(stagingDir, extraFile));
+        } catch (_) {}
+      }
+    }
+    const stagingItems = fs.readdirSync(stagingDir);
+    const args = ["-czf", outPath, "-C", stagingDir, ...stagingItems, "-C", ROOT_DIR, "workspace"];
+    const child = spawn("tar", args);
     let stderr = "";
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("error", reject);
@@ -129,10 +139,11 @@ async function handleBackupFull(msg) {
     const sizeStr = formatSize(fs.statSync(outPath).size);
     const caption =
       `📦 *Full backup Nroz* (${sizeStr})\n` +
-      "• Isi: `db.sql` (database, format seperti /backup) + folder `workspace/` semua sesi (uploads, .memory, artifacts)\n" +
-      "• Tidak termasuk: `.env` (salin manual saat pindah server) dan isi volume sandbox Docker\n\n" +
+      "• Isi: `db.sql` (database) + folder `workspace/` (termasuk profil browser `.browser-profile`) + jadwal (`scheduler_data.json`) + webhook (`webhooks.json`) + `config.json`\n\n" +
       "⚠️ *Memuat API key bot — simpan baik-baik.*\n" +
-      "Restore: ekstrak arsip, lalu `docker exec -i nroz-postgres psql -U nroz -d nroz -v ON_ERROR_STOP=1 < db.sql` dan salin isi `workspace/` ke server baru. `/restore` hanya menerima `db.sql`-nya.";
+      "Restore di server baru:\n" +
+      "1️⃣ Kirim file `.tar.gz` ini ke bot dengan caption `/restore` (jika <= 20 MB), ATAU\n" +
+      "2️⃣ Jalankan di terminal VPS: `bash scripts/setup-vps.sh --restore=" + fileName + "`";
 
     if (fs.statSync(outPath).size > MAX_SEND_BYTES) {
       return await replyText(
@@ -206,34 +217,65 @@ async function handleBackup(msg) {
 
 async function handleRestore(msg, document) {
   const name = document && document.file_name ? document.file_name : "";
-  if (!/\.sql$/i.test(name)) {
-    return replyText(msg, "⚠️ File harus berakhiran `.sql` (hasil perintah /backup).");
+  const isTarGz = /\.(tar\.gz|tgz)$/i.test(name);
+  const isSql = /\.sql$/i.test(name);
+  if (!isSql && !isTarGz) {
+    return replyText(msg, "⚠️ File harus berakhiran `.sql` (hasil `/backup`) atau `.tar.gz` (hasil `/backupfull`).");
   }
   const fileSize = document.file_size || 0;
   if (fileSize > MAX_RESTORE_BYTES) {
     return replyText(
       msg,
-      `⚠️ File ${(fileSize / (1024 * 1024)).toFixed(1)} MB melebihi batas unduhan bot Telegram (20 MB).\n\nRestore manual di server: salin file ke VPS lalu\n\`docker exec -i ${CONTAINER} psql -U nroz -d nroz -v ON_ERROR_STOP=1 < file.sql\``
+      `⚠️ File ${(fileSize / (1024 * 1024)).toFixed(1)} MB melebihi batas unduhan bot Telegram (20 MB).\n\nRestore mudah via terminal VPS:\n\`bash scripts/setup-vps.sh --restore=${name || "backup.tar.gz"}\``
     );
   }
   const { user, db, host } = parseDatabaseUrl();
   if (!isLocalDb(host)) return notLocalReply(msg);
 
-  const tmpPath = path.join(os.tmpdir(), `nroz-restore-${Date.now()}.sql`);
-  await replyText(msg, `⏳ Mengunduh \`${name}\` lalu me-restore database… *data saat ini akan ditimpa.*`);
+  const ext = isTarGz ? ".tar.gz" : ".sql";
+  const tmpPath = path.join(os.tmpdir(), `nroz-restore-${Date.now()}${ext}`);
+  const extractDir = isTarGz ? fs.mkdtempSync(path.join(os.tmpdir(), "nroz-extract-")) : null;
+  await replyText(msg, `⏳ Mengunduh \`${name}\` lalu me-restore ${isTarGz ? "Full Backup (DB + Workspace + Jadwal)" : "Database"}…`);
   try {
     const file = await ctx.bot.getFile(document.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
     const res = await axios.get(fileUrl, { responseType: "arraybuffer", timeout: 60000 });
     fs.writeFileSync(tmpPath, res.data);
 
-    await restoreFromFile(tmpPath, user, db);
+    if (isTarGz) {
+      await new Promise((resolve, reject) => {
+        const child = spawn("tar", ["-xzf", tmpPath, "-C", extractDir]);
+        let stderr = "";
+        child.stderr.on("data", (d) => { stderr += d; });
+        child.on("error", reject);
+        child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`tar extract gagal: ${stderr}`))));
+      });
 
-    // Konfigurasi bot (model/baseUrl/apiKey) mungkin berubah mengikuti isi backup.
+      const sqlFile = path.join(extractDir, "db.sql");
+      if (fs.existsSync(sqlFile)) {
+        await restoreFromFile(sqlFile, user, db);
+      }
+      const wsDir = path.join(extractDir, "workspace");
+      if (fs.existsSync(wsDir)) {
+        fs.cpSync(wsDir, path.join(ROOT_DIR, "workspace"), { recursive: true, force: true });
+      }
+      for (const extraFile of ["scheduler_data.json", "webhooks.json", "config.json"]) {
+        const extractedExtra = path.join(extractDir, extraFile);
+        if (fs.existsSync(extractedExtra)) {
+          fs.copyFileSync(extractedExtra, path.join(ROOT_DIR, extraFile));
+        }
+      }
+    } else {
+      await restoreFromFile(tmpPath, user, db);
+    }
+
+    // Konfigurasi bot (model/baseUrl/apiKey/fallbackModels) mungkin berubah mengikuti isi backup.
     await syncConfigFromDb();
     await replyText(
       msg,
-      "✅ *Restore selesai.* Memori percakapan, konfigurasi bot, dan data akses user sudah diganti dengan isi backup."
+      isTarGz
+        ? "✅ *Full Restore selesai!* Database, seluruh folder `workspace/` (termasuk profil browser), jadwal, dan konfigurasi telah dipulihkan."
+        : "✅ *Restore selesai.* Memori percakapan, konfigurasi bot, dan data akses user sudah diganti dengan isi backup."
     );
   } catch (err) {
     console.error("[Restore] gagal:", err.message);
@@ -243,6 +285,7 @@ async function handleRestore(msg, document) {
     );
   } finally {
     fs.unlink(tmpPath, () => {});
+    if (extractDir) fs.rmSync(extractDir, { recursive: true, force: true });
   }
 }
 

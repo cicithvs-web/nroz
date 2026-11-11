@@ -1013,25 +1013,33 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "ask_user",
       description:
-        "BERTANYA KE USER di tengah tugas, dengan tombol pilihan. Tugas akan MENUNGGU jawaban user (maksimal " +
-        "sesuai 'timeout_minutes', default 10 menit) lalu melanjutkan berdasarkan jawabannya. WAJIB digunakan saat: " +
-        "(1) requirement ambigu dan menebak bisa salah mahal (pilih framework, arsitektur, gaya desain), " +
-        "(2) sebelum tindakan berisiko atau sulit dibatalkan (deploy, hapus data, kirim pesan ke pihak lain), " +
-        "(3) user meminta dikonfirmasi dulu. Berikan 2-4 opsi ringkas bila pertanyaannya pilihan; kosongkan 'options' " +
-        "bila jawabannya bebas. Kalau timeout, lanjutkan dengan asumsi terbaik dan sebutkan asumsinya.",
+        "BERTANYA ATAU MEMINTA INPUT KE USER di tengah tugas TANPA MEMATIKAN SESI/LOOP AI. " +
+        "Tugas akan PAUSE dan MENUNGGU jawaban user (teks, kode OTP, klik tombol, kiriman foto, atau file dokumen) " +
+        "lalu langsung melanjutkan langkah berikutnya di giliran yang sama! " +
+        "WAJIB DIGUNAKAN (JANGAN mengakhiri jawaban dengan teks biasa!) saat: " +
+        "(1) membutuhkan kode OTP / 2FA / kode verifikasi email/SMS / password / data form saat login atau daftar di web, " +
+        "(2) meminta user melakukan aksi manual di layar komputer (set 'include_desktop': true agar screenshot & link Live Desktop ikut dikirim), " +
+        "(3) meminta user mengirim foto/dokumen yang akan di-upload ke form, " +
+        "(4) requirement ambigu atau sebelum tindakan berisiko (deploy, hapus data).",
       parameters: {
         type: "object",
         properties: {
           question: {
             type: "string",
-            description: "Pertanyaan yang jelas dan spesifik (misal: 'Deploy ke staging atau langsung production?').",
+            description: "Pertanyaan atau permintaan input yang jelas (misal: 'Masukkan 6 digit kode OTP yang dikirim ke email/HP kamu:').",
           },
           options: {
             type: "array",
             items: { type: "string" },
             description:
-              "Pilihan jawaban berupa tombol (2-8 opsi, tiap opsi maks 64 karakter, misal ['staging', 'production', 'batalkan']). " +
-              "Kosongkan bila user bebas menjawab dengan teks.",
+              "Pilihan jawaban berupa tombol (2-8 opsi, tiap opsi maks 64 karakter). " +
+              "Kosongkan bila user diminta mengetik kode OTP / teks bebas atau mengirim file.",
+          },
+          include_desktop: {
+            type: "boolean",
+            description:
+              "Set true jika pertanyaan berkaitan dengan layar komputer/browser (misal minta OTP, login manual, atau konfirmasi tampilan). " +
+              "Otomatis melampirkan screenshot layar terkini + tombol Link Live Desktop (noVNC).",
           },
           timeout_minutes: {
             type: "number",
@@ -1039,6 +1047,129 @@ const TOOL_DEFINITIONS = [
           },
         },
         required: ["question"],
+      },
+    },
+  },
+
+  // --- y2) computer_use ---
+  {
+    type: "function",
+    function: {
+      name: "computer_use",
+      description:
+        "Mengendalikan Komputer Virtual GUI (Layar Desktop 1280x720 + Browser Chromium GUI dengan profil & tab permanen + Live Web VNC). " +
+        "Kemampuan utama: " +
+        "• 'start_desktop': menyalakan komputer virtual & menghasilkan Link Live Desktop (noVNC Cloudflare Tunnel) agar user bisa menonton/mengklik layar secara live dari HP/Laptop. " +
+        "• 'screenshot': memotret layar komputer 1280x720 (lengkap dengan penggaris koordinat X/Y dan analisis Vision). " +
+        "• 'open_url': membuka website di Chromium GUI (set 'new_tab': true untuk buka tab baru). " +
+        "• 'list_tabs', 'switch_tab', 'close_tab': melihat daftar tab browser, pindah tab, atau menutup tab. " +
+        "• 'click_text': mencari dan mengklik otomatis tombol/link/input di layar berdasarkan teks/label/placeholder-nya (misal target_text: 'Sign in' atau 'Email', opsional 'input_text' & 'press_enter': true) — 100% akurat tanpa takut meleset koordinat! " +
+        "• 'click', 'double_click', 'right_click', 'move', 'drag', 'scroll': menggerakkan mouse & klik koordinat (x, y) di layar. Pada 'click', kamu bisa sekaligus mengisi 'text' dan 'press_enter': true agar klik kotak input + ketik + Enter jalan dalam 1 langkah! " +
+        "• 'type': mengetik teks pada input yang sedang fokus (opsional 'clear_first': true, 'press_enter': true). " +
+        "• 'key': menekan tombol atau kombinasi shortcut keyboard (misal 'Return', 'Tab', 'Escape', 'ctrl+t', 'ctrl+w', 'ctrl+l', 'ctrl+Tab', 'BackSpace'). " +
+        "• 'wait': menunggu beberapa detik hingga halaman selesai loading lalu mengambil screenshot. " +
+        "PENTING: Jika saat login/daftar muncul permintaan kode OTP, 2FA, password, atau butuh bantuan user di layar, JANGAN berhenti/menjawab teks biasa — PANGGIL tool 'ask_user' dengan 'include_desktop': true agar sesi tetap hidup menunggu user!",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [
+              "start_desktop",
+              "stop_desktop",
+              "screenshot",
+              "open_url",
+              "list_tabs",
+              "switch_tab",
+              "close_tab",
+              "click_text",
+              "click",
+              "double_click",
+              "right_click",
+              "move",
+              "drag",
+              "scroll",
+              "type",
+              "key",
+              "wait"
+            ],
+            description: "Jenis aksi komputer yang dijalankan.",
+          },
+          url: {
+            type: "string",
+            description: "URL website untuk action='open_url'.",
+          },
+          new_tab: {
+            type: "boolean",
+            description: "Jika true pada 'open_url', buka di tab baru tanpa menutup tab aktif.",
+          },
+          tab: {
+            type: "string",
+            description: "Nomor urut tab (1, 2, ...) atau kata kunci judul/URL untuk 'switch_tab' / 'close_tab'.",
+          },
+          x: {
+            type: "number",
+            description: "Koordinat horizontal X di layar (0 sampai 1280) untuk click/double_click/right_click/move/drag/scroll.",
+          },
+          y: {
+            type: "number",
+            description: "Koordinat vertikal Y di layar (0 sampai 720) untuk click/double_click/right_click/move/drag/scroll.",
+          },
+          to_x: {
+            type: "number",
+            description: "Koordinat X tujuan akhir untuk action='drag'.",
+          },
+          to_y: {
+            type: "number",
+            description: "Koordinat Y tujuan akhir untuk action='drag'.",
+          },
+          text: {
+            type: "string",
+            description: "Teks yang diketik untuk action='type' atau langsung diketik setelah action='click' (atau label tombol untuk 'click_text').",
+          },
+          target_text: {
+            type: "string",
+            description: "Teks tombol, link, placeholder, atau label input yang ingin diklik pada action='click_text' (contoh: 'Sign in', 'Kirim Kode', 'Email').",
+          },
+          input_text: {
+            type: "string",
+            description: "Opsional untuk action='click_text': teks yang langsung diketik ke elemen setelah diklik.",
+          },
+          clear_first: {
+            type: "boolean",
+            description: "Jika true pada 'type' atau 'click', hapus isi kotak input sebelumnya (Ctrl+A + BackSpace) sebelum mengetik.",
+          },
+          press_enter: {
+            type: "boolean",
+            description: "Jika true pada 'type' atau 'click', tekan tombol Enter setelah selesai mengetik.",
+          },
+          key: {
+            type: "string",
+            description: "Nama tombol/shortcut X11 untuk action='key' (contoh: 'Return', 'Tab', 'Escape', 'BackSpace', 'ctrl+t', 'ctrl+w', 'ctrl+l', 'Page_Down').",
+          },
+          direction: {
+            type: "string",
+            enum: ["down", "up", "left", "right"],
+            description: "Arah gulir untuk action='scroll' (default: 'down').",
+          },
+          amount: {
+            type: "number",
+            description: "Jumlah step scroll untuk action='scroll' (default: 4).",
+          },
+          seconds: {
+            type: "number",
+            description: "Durasi tunggu dalam detik (1-30) untuk action='wait'.",
+          },
+          send_to_chat: {
+            type: "boolean",
+            description: "Kirim hasil screenshot layar ke chat Telegram user (default true untuk 'screenshot', false untuk aksi lainnya kecuali diminta).",
+          },
+          visual_focus: {
+            type: "string",
+            description: "Fokus elemen/area yang ingin diperiksa Vision pada layar.",
+          },
+        },
+        required: ["action"],
       },
     },
   },

@@ -86,7 +86,23 @@ function describeToolCall(name, args = {}) {
     case "save_knowledge":
       return `menyimpan pengetahuan "${oneLine(args.title || "catatan", 45)}" ke memori semantik`;
     case "ask_user":
-      return `bertanya ke user: "${oneLine(args.question, 60)}"${Array.isArray(args.options) && args.options.length ? ` (${args.options.length} opsi)` : ""}`;
+      return `menunggu jawaban user: "${oneLine(args.question, 60)}"${args.include_desktop ? " (🖥️ + live desktop)" : ""}${Array.isArray(args.options) && args.options.length ? ` (${args.options.length} opsi)` : ""}`;
+    case "computer_use": {
+      const act = oneLine(args.action || "desktop", 20);
+      if (act === "open_url") return `membuka ${oneLine(args.url, 55)} di komputer virtual`;
+      if (act === "click_text") {
+        const lbl = oneLine(args.target_text || args.text || "", 35);
+        return `mengklik elemen "${lbl}" di komputer${args.input_text ? ` + ketik "${oneLine(maskSecret(args.input_text), 25)}"` : ""}`;
+      }
+      if (act === "click" || act === "double_click" || act === "right_click") {
+        return `${act} komputer di (${args.x ?? "?"}, ${args.y ?? "?"})${args.text ? ` + ketik "${oneLine(maskSecret(args.text), 25)}"` : ""}`;
+      }
+      if (act === "type") return `mengetik di komputer: "${oneLine(maskSecret(args.text), 40)}"`;
+      if (act === "key") return `menekan tombol '${oneLine(args.key, 25)}' di komputer`;
+      if (act === "start_desktop") return "menyalakan & membuat link Live Desktop";
+      if (act === "screenshot") return "memotret layar komputer virtual";
+      return `komputer virtual: ${act}`;
+    }
     case "analyze_video_reference":
       return `menganalisis gaya video referensi ${oneLine(path.basename(args.video_path || ""), 30)}`;
     case "media_download":

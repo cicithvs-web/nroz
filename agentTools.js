@@ -37,6 +37,7 @@ const system = require("./tools/system");
 const knowledge = require("./tools/knowledge");
 const ask = require("./tools/ask");
 const videoRef = require("./tools/videoRef");
+const computer = require("./tools/computer");
 
 /**
  * Tool: delegate_task
@@ -130,6 +131,7 @@ const TOOL_HANDLERS = {
   search_knowledge: knowledge.toolSearchKnowledge,
   save_knowledge: knowledge.toolSaveKnowledge,
   ask_user: ask.toolAskUser,
+  computer_use: computer.toolComputerUse,
   analyze_video_reference: videoRef.toolAnalyzeVideoReference,
   media_download: media.toolMediaDownload,
   render_remotion_video: media.toolRenderRemotionVideo,

@@ -1,15 +1,18 @@
 /**
- * tools/ask.js — Tool ask_user: agent boleh bertanya ke user di tengah tugas.
+ * tools/ask.js — Tool ask_user: agent boleh bertanya / meminta input (OTP, 2FA, login, file, konfirmasi)
+ * ke user di tengah tugas TANPA mematikan sesi/loop AI.
  *
- * Pertanyaan tampil sebagai pesan Telegram dengan tombol inline (kalau diberi opsi).
- * Jawaban masuk lewat dua jalur: klik tombol (bot/callbacks.js) atau pesan teks berikutnya
- * yang diintersep di bot/handlers.js SEBELUM masuk antrean giliran — jadi tugas yang
- * sedang menunggu tidak deadlock dengan antrean per sesi. Tidak ada jawaban sampai
- * timeout dianggap "tidak dijawab", dan agent melanjutkan dengan asumsi terbaik.
+ * Pertanyaan tampil sebagai pesan Telegram dengan tombol inline (kalau diberi opsi atau include_desktop).
+ * Jawaban masuk lewat tiga jalur:
+ *   1. Klik tombol inline (bot/callbacks.js)
+ *   2. Pesan teks / voice berikutnya (diintersep di bot/handlers.js SEBELUM masuk turnQueue)
+ *   3. Kiriman Foto / Dokumen berikutnya (diintersep di bot/handlers.js SEBELUM masuk turnQueue,
+ *      otomatis disimpan ke /workspace/uploads/... dan path-nya diserahkan ke agent yang sedang menunggu)
  */
 
 const crypto = require("crypto");
 const ctx = require("../bot/context");
+const { startDesktopTunnel, captureDesktopScreenshot } = require("../desktopManager.js");
 
 const DEFAULT_TIMEOUT_MIN = Number(process.env.ASK_USER_DEFAULT_MINUTES) || 10;
 const MAX_TIMEOUT_MIN = 60;
@@ -32,9 +35,18 @@ function entryCount(sessionId) {
 
 /**
  * Tool: ask_user
- * @returns {Promise<string>} hasil untuk model: jawaban user atau status timeout.
+ * @returns {Promise<string>} hasil untuk model: jawaban user (teks/tombol/file) atau status timeout.
  */
-async function toolAskUser({ question, options, timeout_minutes, sessionId, chatId, threadId }) {
+async function toolAskUser({
+  question,
+  options,
+  include_desktop,
+  timeout_minutes,
+  sessionId,
+  chatId,
+  threadId,
+  onMediaSent
+}) {
   if (!question || typeof question !== "string" || !question.trim()) {
     return "❌ Parameter 'question' wajib berupa string pertanyaan.";
   }
@@ -56,34 +68,84 @@ async function toolAskUser({ question, options, timeout_minutes, sessionId, chat
     }
   }
 
-  const q = question.trim().slice(0, MAX_QUESTION_LEN);
-  const timeoutMin = clampTimeout(timeout_minutes);
-  const token = crypto.randomBytes(6).toString("hex");
   const chatIdStr = String(chatId);
   const sendOpts = threadId ? { message_thread_id: threadId } : {};
 
+  // Jika include_desktop aktif, kirim screenshot layar terkini & siapkan link Live Desktop (noVNC)
+  let desktopUrl = null;
+  if (include_desktop) {
+    try {
+      const shot = await captureDesktopScreenshot({ withGrid: false });
+      if (ctx.bot.sendPhoto) {
+        await ctx.bot.sendPhoto(
+          chatIdStr,
+          shot.rawBuffer,
+          {
+            ...sendOpts,
+            caption: "🖥️ Tampilan layar komputer saat ini (menunggu input/tindakanmu)"
+          },
+          { filename: "desktop_prompt.png", contentType: "image/png" }
+        );
+        if (typeof onMediaSent === "function") onMediaSent("photo");
+      }
+    } catch (err) {
+      console.warn("[AskUser] Gagal mengirim screenshot desktop:", err.message);
+    }
+
+    try {
+      const tunnel = await startDesktopTunnel(120);
+      desktopUrl = tunnel?.url || null;
+    } catch (err) {
+      console.warn("[AskUser] Gagal membuka tunnel desktop:", err.message);
+    }
+
+    if (cleanOptions.length === 0) {
+      cleanOptions = ["✅ Sudah selesai, lanjutkan", "🛑 Batalkan"];
+    }
+  }
+
+  const q = question.trim().slice(0, MAX_QUESTION_LEN);
+  const timeoutMin = clampTimeout(timeout_minutes);
+  const token = crypto.randomBytes(6).toString("hex");
+
   const header = `❓ *Pertanyaan Agent*${entryCount(sessionId) > 0 ? " (antrean)" : ""}`;
+  const desktopLine = desktopUrl
+    ? `\n\n🖥️ *Live Komputer (Klik untuk buka layar):*\n${desktopUrl}`
+    : "";
   const hint = cleanOptions.length
-    ? `\n\n_Ketuk salah satu tombol di bawah, atau langsung ketik jawabanmu di chat._`
-    : `\n\n_Balas dengan mengetik jawabanmu langsung di chat._`;
+    ? `\n\n_Ketuk tombol di bawah, atau langsung balas dengan teks / kode OTP / foto / file di chat._`
+    : `\n\n_Balas langsung dengan mengetik jawaban / kode OTP, atau kirim foto/file di chat._`;
+
+  const inlineRows = [];
+  if (desktopUrl) {
+    inlineRows.push([{ text: "🖥️ Buka Layar Komputer (Live)", url: desktopUrl }]);
+  }
+  for (let i = 0; i < cleanOptions.length; i++) {
+    inlineRows.push([{ text: cleanOptions[i], callback_data: `ask:${token}:${i}` }]);
+  }
 
   let sent;
   try {
     sent = await ctx.bot.sendMessage(
       chatIdStr,
-      `${header}\n\n${q}${hint}`,
+      `${header}\n\n${q}${desktopLine}${hint}`,
       {
         ...sendOpts,
         parse_mode: "Markdown",
-        ...(cleanOptions.length
-          ? { reply_markup: { inline_keyboard: cleanOptions.map((label, i) => [{ text: label, callback_data: `ask:${token}:${i}` }]) } }
-          : {})
+        ...(inlineRows.length ? { reply_markup: { inline_keyboard: inlineRows } } : {})
       }
     );
   } catch (err) {
     // Markdown bisa ditolak karena karakter aneh di pertanyaan — coba tanpa format.
     try {
-      sent = await ctx.bot.sendMessage(chatIdStr, `${header}\n\n${q}${hint}`, sendOpts);
+      sent = await ctx.bot.sendMessage(
+        chatIdStr,
+        `${header}\n\n${q}${desktopLine}${hint}`,
+        {
+          ...sendOpts,
+          ...(inlineRows.length ? { reply_markup: { inline_keyboard: inlineRows } } : {})
+        }
+      );
     } catch (err2) {
       return `❌ Gagal mengirim pertanyaan ke user: ${err2.message}`;
     }
@@ -97,6 +159,7 @@ async function toolAskUser({ question, options, timeout_minutes, sessionId, chat
       threadId: threadId || null,
       question: q,
       options: cleanOptions,
+      includeDesktop: Boolean(include_desktop),
       resolve,
       messageId: sent?.message_id || null,
       timer: null
@@ -155,7 +218,10 @@ async function handleAskCallback(query) {
   let hit = null;
   for (const list of pendingAsks.values()) {
     const found = list.find((e) => e.token === token);
-    if (found) { hit = found; break; }
+    if (found) {
+      hit = found;
+      break;
+    }
   }
 
   if (!hit || !Number.isInteger(idx) || idx < 0 || idx >= hit.options.length) {
@@ -176,9 +242,9 @@ async function handleAskCallback(query) {
  * masuk antrean AI. @returns {boolean} true jika teks dipakai sebagai jawaban.
  */
 function takePendingAskAnswer(sessionId, text) {
-  // Hanya pesan teks yang boleh menjawab. Event "message" di bot/handlers.js juga menyala
-  // untuk foto/video/dokumen yang tidak punya .text; tanpa penjagaan ini kiriman media
-  // akan menutup pertanyaan dengan jawaban kosong dan agent melanjutkan dengan asumsi salah.
+  // Hanya pesan teks yang boleh menjawab lewat fungsi ini. Event "message" di bot/handlers.js
+  // juga menyala untuk foto/video/dokumen yang tidak punya .text; kiriman foto/dokumen ditangani
+  // secara khusus oleh takePendingAskMedia setelah filenya disimpan ke /workspace/uploads/.
   if (typeof text !== "string" || !text.trim()) return false;
 
   const list = pendingAsks.get(String(sessionId));
@@ -188,8 +254,42 @@ function takePendingAskAnswer(sessionId, text) {
 
   if (entry.timer) clearTimeout(entry.timer);
   const answer = String(text || "").trim().slice(0, 2000);
-  markQuestionClosed(entry, `\n\n✅ _Jawaban tercatat (teks): ${answer.slice(0, 120)}${answer.length > 120 ? "…" : ""}_`, answer);
+  markQuestionClosed(
+    entry,
+    `\n\n✅ _Jawaban tercatat (teks): ${answer.slice(0, 120)}${answer.length > 120 ? "…" : ""}_`,
+    answer
+  );
   entry.resolve(`✅ User menjawab lewat teks: "${answer}"`);
+  return true;
+}
+
+/**
+ * Jawaban lewat kiriman Foto atau Dokumen/File saat ask_user sedang menunggu.
+ * Dipanggil dari bot/handlers.js setelah file disimpan ke /workspace/uploads/ (tanpa masuk turnQueue).
+ * @param {string} sessionId
+ * @param {{ type: string, fileName: string, savedFilePath: string, sandboxPath: string, caption?: string }} media
+ * @returns {boolean}
+ */
+function takePendingAskMedia(sessionId, media = {}) {
+  const list = pendingAsks.get(String(sessionId));
+  if (!list || list.length === 0) return false;
+  const entry = list.shift();
+  if (list.length === 0) pendingAsks.delete(entry.sessionId);
+
+  if (entry.timer) clearTimeout(entry.timer);
+  const label = media.type === "photo" ? "Foto" : "File/Dokumen";
+  const cap = String(media.caption || "").trim();
+  markQuestionClosed(
+    entry,
+    `\n\n✅ _Jawaban tercatat (${label}): ${media.fileName}${cap ? ` — "${cap.slice(0, 80)}"` : ""}_`,
+    media.fileName
+  );
+  entry.resolve(
+    `✅ User menjawab dengan mengirim ${label}: "${media.fileName}"\n` +
+      `• Path Host: ${media.savedFilePath}\n` +
+      `• Path Sandbox: ${media.sandboxPath}` +
+      (cap ? `\n• Pesan/Caption User: "${cap}"` : "")
+  );
   return true;
 }
 
@@ -211,6 +311,7 @@ module.exports = {
   toolAskUser,
   handleAskCallback,
   takePendingAskAnswer,
+  takePendingAskMedia,
   cancelPendingAsks,
   pendingAskCount: entryCount,
   _resetForTests: () => pendingAsks.clear()

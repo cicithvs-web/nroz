@@ -17,7 +17,7 @@ ctx.bot = {
   editMessageReplyMarkup: async () => ({})
 };
 
-const { toolAskUser, takePendingAskAnswer, pendingAskCount, _resetForTests } = require("../tools/ask");
+const { toolAskUser, takePendingAskAnswer, takePendingAskMedia, pendingAskCount, _resetForTests } = require("../tools/ask");
 
 /** Jeda singkat agar entry pertanyaan selesai terdaftar. */
 const settle = () => new Promise((r) => setTimeout(r, 50));
@@ -46,4 +46,26 @@ test("kiriman media (tanpa .text) tidak menjawab pertanyaan tertunda", async () 
 test("tanpa pertanyaan tertunda, jawaban teks tidak diintersep", () => {
   _resetForTests();
   assert.equal(takePendingAskAnswer("ask-kosong", "halo"), false);
+});
+
+test("takePendingAskMedia menangkap foto/dokumen saat ask_user sedang menunggu", async () => {
+  _resetForTests();
+  const sessionId = "ask-upload";
+  const answer = toolAskUser({ question: "Silakan kirim foto KTP/logo untuk di-upload:", sessionId, chatId: 1 });
+  await settle();
+  assert.equal(pendingAskCount(sessionId), 1);
+
+  const intercepted = takePendingAskMedia(sessionId, {
+    type: "photo",
+    fileName: "photo_123.jpg",
+    savedFilePath: "/opt/nroz/workspace/ask-upload/uploads/photo_123.jpg",
+    sandboxPath: "/workspace/uploads/photo_123.jpg",
+    caption: "ini logonya"
+  });
+  assert.equal(intercepted, true);
+  assert.equal(pendingAskCount(sessionId), 0);
+  const resText = await answer;
+  assert.match(resText, /photo_123\.jpg/);
+  assert.match(resText, /\/workspace\/uploads\/photo_123\.jpg/);
+  assert.match(resText, /ini logonya/);
 });

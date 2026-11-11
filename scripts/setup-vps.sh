@@ -4,8 +4,9 @@
 #
 #   bash scripts/setup-vps.sh              # pasang yang kurang, lalu jalankan bot
 #   bash scripts/setup-vps.sh --check      # periksa saja, tidak mengubah apa pun
+#   bash scripts/setup-vps.sh --restore=nroz-full-backup.tar.gz  # restore full backup/db
 #
-# Opsi: --skip-node --skip-docker --skip-npm --skip-start --swap-mb=4096
+# Opsi: --skip-node --skip-docker --skip-npm --skip-start --swap-mb=4096 --restore=<file>
 # Idempoten: aman dijalankan ulang, tiap langkah dilewati kalau sudah beres.
 
 set -uo pipefail
@@ -18,6 +19,7 @@ INSTALL_DOCKER=1
 INSTALL_NPM=1
 START_BOT=1
 SWAP_MB=4096
+RESTORE_FILE=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -27,6 +29,7 @@ for arg in "$@"; do
     --skip-npm) INSTALL_NPM=0 ;;
     --skip-start) START_BOT=0 ;;
     --swap-mb=*) SWAP_MB="${arg#--swap-mb=}" ;;
+    --restore=*) RESTORE_FILE="${arg#--restore=}" ;;
     *) echo "Opsi tidak dikenal: $arg"; exit 2 ;;
   esac
 done
@@ -108,13 +111,14 @@ apt_ensure_update() {
 # ---------------------------------------------------------------- periksa saja
 if [ "$CHECK_ONLY" -eq 1 ]; then
   echo "Kondisi server saat ini ($OS_LABEL, $OS_ARCH):"
-  check "Node.js >= 18" '[ "$(node -v 2>/dev/null | tr -d v | cut -d. -f1)" -ge 18 ]' "bash scripts/setup-vps.sh"
+  check "Node.js >= 20" '[ "$(node -v 2>/dev/null | tr -d v | cut -d. -f1)" -ge 20 ]' "bash scripts/setup-vps.sh"
   check "npm" "command -v npm"
   check "Docker daemon jalan" "docker info" "bash scripts/setup-vps.sh (atau: systemctl start docker)"
   check "ffmpeg" "command -v ffmpeg"
   check "ffprobe" "command -v ffprobe"
   check "yt-dlp" "command -v yt-dlp"
   check "cloudflared (web preview & link unduhan)" "command -v cloudflared" "bash scripts/setup-vps.sh"
+  check "Virtual Desktop GUI (Xvfb, x11vnc, noVNC, xdotool, xclip)" "command -v Xvfb && command -v x11vnc && command -v websockify && command -v xdotool && command -v scrot && command -v xclip && [ -f /usr/share/novnc/index.html ]" "bash scripts/setup-vps.sh"
   check "python3 + venv" "python3 -m venv --help"
   check ".env terisi BOT_TOKEN" "grep -qE '^BOT_TOKEN=[A-Za-z0-9]' .env" "cp .env.example .env lalu isi"
   check ".env terisi DATABASE_URL" "grep -qE '^DATABASE_URL=postgres://' .env && ! grep -q '^DATABASE_URL=postgres://user:password' .env" "dibuat otomatis oleh setup-vps.sh"
@@ -122,7 +126,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   check "node_modules bot" "[ -d node_modules ]" "npm install"
   check "node_modules remotion-engine" "[ -d remotion-engine/node_modules ]" "cd remotion-engine && npm install"
   check "Chrome Headless Shell (Remotion)" "[ -d remotion-engine/node_modules/.remotion/chrome-headless-shell ]" "cd remotion-engine && npx remotion browser ensure"
-  check "Browser MCP (Playwright)" "[ -f /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome ]" "npx -y @playwright/mcp@0.0.83 install-browser --with-deps chrome-for-testing"
+  check "Browser MCP & Desktop (Playwright Chromium)" "ls /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome >/dev/null 2>&1" "npx -y @playwright/mcp@0.0.83 install-browser --with-deps chromium"
   check "venv TTS (/opt/voice-env)" "[ -x /opt/voice-env/bin/edge-tts ]" "dibuat otomatis saat TTS pertama dipakai"
   check "image sandbox Docker" "docker image inspect nroz-sandbox:latest" "docker build -f Dockerfile.sandbox -t nroz-sandbox:latest ."
   check "swap aktif" "[ \"\$(awk '/^SwapTotal/ {print \$2}' /proc/meminfo)\" -gt 102400 ]" "bash scripts/setup-vps.sh --swap-mb=4096"
@@ -140,13 +144,13 @@ fi
 
 # ---------------------------------------------------------------- node
 if [ "$INSTALL_NODE" -eq 1 ]; then
-  if [ "$(node -v 2>/dev/null | tr -d v | cut -d. -f1)" -ge 18 ] 2>/dev/null; then
+  if [ "$(node -v 2>/dev/null | tr -d v | cut -d. -f1)" -ge 20 ] 2>/dev/null; then
     say "Node.js $(node -v) sudah cukup, lewati"
   else
-    say "Memasang Node.js 20 dari NodeSource"
+    say "Memasang Node.js 22 dari NodeSource"
     apt_ensure_update
     apt-get install -y -qq curl ca-certificates gnupg
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     apt-get install -y -qq nodejs
   fi
 fi
@@ -176,6 +180,29 @@ for candidates in "libnss3" "libnspr4" "libasound2t64 libasound2" "libatk1.0-0t6
     warn "tidak ada kandidat untuk: $candidates"
   fi
 done
+
+say "Memasang paket Virtual Desktop GUI (Xvfb, Fluxbox, x11vnc, noVNC, xdotool, scrot, Pillow, xclip)"
+apt_ensure_update
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+  xvfb x11vnc novnc python3-websockify xdotool scrot fluxbox imagemagick \
+  dbus-x11 fonts-liberation x11-xserver-utils python3-pil xclip || true
+
+if [ -d /usr/share/novnc ] && [ ! -f /usr/share/novnc/index.html ]; then
+  cat > /usr/share/novnc/index.html <<'HTML'
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Nroz Virtual Desktop</title>
+  <script>
+    const q = window.location.search || "?autoconnect=true&resize=scale";
+    window.location.replace("/vnc.html" + q + window.location.hash);
+  </script>
+</head>
+<body>Redirecting to Nroz Virtual Desktop...</body>
+</html>
+HTML
+fi
 
 # ---------------------------------------------------------------- docker
 if [ "$INSTALL_DOCKER" -eq 1 ]; then
@@ -245,8 +272,12 @@ if [ "$INSTALL_NPM" -eq 1 ]; then
   npm install --no-fund --no-audit
   say "npm install (remotion-engine) + unduh Chrome Headless Shell"
   (cd remotion-engine && npm install --no-fund --no-audit && npx remotion browser ensure)
-  say "Unduh browser Playwright untuk MCP"
-  npx -y @playwright/mcp@0.0.83 install-browser --with-deps chrome-for-testing
+  say "Unduh browser Playwright Chromium untuk MCP & Virtual Desktop"
+  if ls /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome >/dev/null 2>&1; then
+    say "Browser Playwright Chromium sudah ada, lewati"
+  else
+    npx -y @playwright/mcp@0.0.83 install-browser --with-deps chromium
+  fi
 fi
 
 # ---------------------------------------------------------------- postgres
@@ -318,6 +349,46 @@ else
 fi
 
 mkdir -p workspace
+
+# ---------------------------------------------------------------- restore backup (opsional)
+if [ -n "$RESTORE_FILE" ]; then
+  if [ ! -f "$RESTORE_FILE" ]; then
+    bad "File restore tidak ditemukan: $RESTORE_FILE"
+    exit 1
+  fi
+  say "Me-restore data dari: $RESTORE_FILE"
+  case "$RESTORE_FILE" in
+    *.tar.gz|*.tgz)
+      TMP_RESTORE="$(mktemp -d)"
+      tar -xzf "$RESTORE_FILE" -C "$TMP_RESTORE"
+      if [ -f "$TMP_RESTORE/db.sql" ]; then
+        say "  -> Restore database PostgreSQL (db.sql)"
+        docker exec -i nroz-postgres psql -U nroz -d nroz -v ON_ERROR_STOP=1 < "$TMP_RESTORE/db.sql" >/dev/null
+      fi
+      if [ -d "$TMP_RESTORE/workspace" ]; then
+        say "  -> Menyalin folder workspace/"
+        cp -a "$TMP_RESTORE/workspace/." "$ROOT_DIR/workspace/"
+      fi
+      for f in scheduler_data.json webhooks.json config.json; do
+        if [ -f "$TMP_RESTORE/$f" ]; then
+          say "  -> Menyalin $f"
+          cp -a "$TMP_RESTORE/$f" "$ROOT_DIR/$f"
+        fi
+      done
+      rm -rf "$TMP_RESTORE"
+      ok "Full backup (.tar.gz) berhasil di-restore!"
+      ;;
+    *.sql)
+      say "  -> Restore database PostgreSQL ($RESTORE_FILE)"
+      docker exec -i nroz-postgres psql -U nroz -d nroz -v ON_ERROR_STOP=1 < "$RESTORE_FILE" >/dev/null
+      ok "Database (.sql) berhasil di-restore!"
+      ;;
+    *)
+      bad "Format file restore harus .tar.gz atau .sql"
+      exit 1
+      ;;
+  esac
+fi
 
 # ---------------------------------------------------------------- jalankan
 if [ "$START_BOT" -eq 1 ]; then

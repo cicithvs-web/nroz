@@ -13,6 +13,7 @@ const { StdioClientTransport } = require("./node_modules/@modelcontextprotocol/s
 const { resolveInWorkspace } = require("./lib/pathGuard");
 const { fixMcpArgs, describeArgsShape } = require("./lib/mcpArgs");
 const { toSandboxPath } = require("./tools/common");
+const { ensureDesktopServices } = require("./desktopManager.js");
 
 const CONFIG_PATH = path.join(__dirname, "mcp_servers.json");
 
@@ -53,6 +54,13 @@ function loadMcpConfig() {
  * (misalnya proses Playwright crash), supaya panggilan berikutnya menyambung ulang.
  */
 async function connectServer(serverName, serverCfg) {
+  if (serverName === "browser") {
+    try {
+      await ensureDesktopServices({ startBrowser: true });
+    } catch (err) {
+      console.warn("[MCP] Gagal menyiapkan layanan Virtual Desktop sebelum browser MCP:", err.message);
+    }
+  }
   const env = { ...process.env, ...(serverCfg.env || {}) };
   const transport = new StdioClientTransport({
     command: serverCfg.command || "npx",
