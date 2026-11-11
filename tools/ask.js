@@ -264,31 +264,61 @@ function takePendingAskAnswer(sessionId, text) {
 }
 
 /**
- * Jawaban lewat kiriman Foto atau Dokumen/File saat ask_user sedang menunggu.
+ * Jawaban lewat kiriman Foto atau Dokumen/File (tunggal maupun batch multi-file) saat ask_user sedang menunggu.
  * Dipanggil dari bot/handlers.js setelah file disimpan ke /workspace/uploads/ (tanpa masuk turnQueue).
  * @param {string} sessionId
- * @param {{ type: string, fileName: string, savedFilePath: string, sandboxPath: string, caption?: string }} media
+ * @param {{ type: string, fileName: string, savedFilePath: string, sandboxPath: string, caption?: string } | Array<{ type: string, fileName: string, savedFilePath: string, sandboxPath: string, caption?: string }>} mediaOrList
  * @returns {boolean}
  */
-function takePendingAskMedia(sessionId, media = {}) {
+function takePendingAskMedia(sessionId, mediaOrList = {}) {
   const list = pendingAsks.get(String(sessionId));
   if (!list || list.length === 0) return false;
+  const items = Array.isArray(mediaOrList) ? mediaOrList.filter(Boolean) : [mediaOrList].filter(Boolean);
+  if (items.length === 0) return false;
+
   const entry = list.shift();
   if (list.length === 0) pendingAsks.delete(entry.sessionId);
-
   if (entry.timer) clearTimeout(entry.timer);
-  const label = media.type === "photo" ? "Foto" : "File/Dokumen";
-  const cap = String(media.caption || "").trim();
+
+  if (items.length === 1) {
+    const media = items[0];
+    const label = media.type === "photo" ? "Foto" : "File/Dokumen";
+    const cap = String(media.caption || "").trim();
+    markQuestionClosed(
+      entry,
+      `\n\n✅ _Jawaban tercatat (${label}): ${media.fileName}${cap ? ` — "${cap.slice(0, 80)}"` : ""}_`,
+      media.fileName
+    );
+    entry.resolve(
+      `✅ User menjawab dengan mengirim ${label}: "${media.fileName}"\n` +
+        `• Path Host: ${media.savedFilePath}\n` +
+        `• Path Sandbox: ${media.sandboxPath}` +
+        (cap ? `\n• Pesan/Caption User: "${cap}"` : "")
+    );
+    return true;
+  }
+
+  const combinedCaption = items
+    .map((m) => String(m.caption || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  const namesSummary = items.map((m) => m.fileName).join(", ");
   markQuestionClosed(
     entry,
-    `\n\n✅ _Jawaban tercatat (${label}): ${media.fileName}${cap ? ` — "${cap.slice(0, 80)}"` : ""}_`,
-    media.fileName
+    `\n\n✅ _Jawaban tercatat (${items.length} file): ${namesSummary.slice(0, 100)}${namesSummary.length > 100 ? "…" : ""}_`,
+    namesSummary
   );
+
+  const lines = items.map((m, idx) => {
+    const label = m.type === "photo" ? "Foto" : "File/Dokumen";
+    return `${idx + 1}. [${label}] "${m.fileName}" -> Sandbox: ${m.sandboxPath} (Host: ${m.savedFilePath})`;
+  });
+
   entry.resolve(
-    `✅ User menjawab dengan mengirim ${label}: "${media.fileName}"\n` +
-      `• Path Host: ${media.savedFilePath}\n` +
-      `• Path Sandbox: ${media.sandboxPath}` +
-      (cap ? `\n• Pesan/Caption User: "${cap}"` : "")
+    `✅ User menjawab dengan mengirim ${items.length} file sekaligus:\n` +
+      lines.join("\n") +
+      (combinedCaption ? `\n• Pesan/Caption User: "${combinedCaption}"` : "")
   );
   return true;
 }

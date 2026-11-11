@@ -28,6 +28,7 @@ const { isOwner } = require("./config");
 const { handleRestore } = require("./dbBackup");
 const { takePendingAskAnswer, takePendingAskMedia, pendingAskCount } = require("../tools/ask");
 const { ingestFileBuffer, ingestChatMessage } = require("./knowledge");
+const { defaultMediaBatcher, allocateUniqueUploadName } = require("../lib/mediaBatcher");
 
 /**
  * Menyimpan file kiriman user ke workspace dari HOST. Sandbox bisa menaruh symlink
@@ -122,10 +123,423 @@ function registerHandlers(bot) {
     });
   });
 
-  // === HANDLER FOTO ===
+  /**
+   * Mengunduh dan menyimpan satu item media (foto atau dokumen) ke folder uploads sesi
+   * dengan nama file unik (aman dari bentrok walau dikirim di milidetik yang sama).
+   */
+  async function downloadAndSaveMediaItem(sessionId, item, ws, usedNames) {
+    if (item.type === "photo") {
+      const photo = item.msg.photo[item.msg.photo.length - 1];
+      const file = await bot.getFile(photo.file_id);
+      const telegramUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+      const response = await axios.get(telegramUrl, { responseType: "arraybuffer" });
+      const bufferData = Buffer.from(response.data);
+      const photoName = allocateUniqueUploadName(ws.uploadsDir, `photo_${Date.now()}.jpg`, usedNames);
+      const savedFilePath = path.join(ws.uploadsDir, photoName);
+      writeUploadSafely(sessionId, savedFilePath, bufferData);
+      return {
+        type: "photo",
+        msg: item.msg,
+        fileName: photoName,
+        savedFilePath,
+        sandboxPath: `/workspace/uploads/${photoName}`,
+        bufferData,
+        fileSizeKb: (bufferData.length / 1024).toFixed(1),
+        ext: ".jpg",
+        mime: "image/jpeg",
+        base64: bufferData.toString("base64"),
+        caption: (item.msg.caption || "").trim()
+      };
+    }
+
+    // type === "document"
+    const file = await bot.getFile(item.msg.document.file_id);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+    const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
+    const bufferData = Buffer.from(response.data);
+    const rawFileName = item.msg.document.file_name || `file_${Date.now()}`;
+    const baseSafe = sanitizePath(rawFileName).replace(/[\/\\]/g, "_") || `file_${Date.now()}`;
+    const safeName = allocateUniqueUploadName(ws.uploadsDir, baseSafe, usedNames);
+    const savedFilePath = path.join(ws.uploadsDir, safeName);
+    writeUploadSafely(sessionId, savedFilePath, bufferData);
+
+    const ext = path.extname(safeName).toLowerCase();
+    const isImageDoc = [".jpg", ".jpeg", ".png", ".webp"].includes(ext);
+    const mime = isImageDoc
+      ? ext === ".png"
+        ? "image/png"
+        : ext === ".webp"
+          ? "image/webp"
+          : "image/jpeg"
+      : null;
+
+    return {
+      type: "document",
+      msg: item.msg,
+      fileName: safeName,
+      savedFilePath,
+      sandboxPath: `/workspace/uploads/${safeName}`,
+      bufferData,
+      fileSizeKb: (bufferData.length / 1024).toFixed(1),
+      ext,
+      mime,
+      base64: isImageDoc ? bufferData.toString("base64") : null,
+      caption: (item.msg.caption || "").trim()
+    };
+  }
+
+  /**
+   * Memproses rombongan (batch 1..N) foto dan/atau dokumen yang dikirim serentak (Album / multi-upload)
+   * dalam 1 giliran AI tunggal tanpa memicu pesan antrean palsu.
+   */
+  async function processMediaBatch(sessionId, items) {
+    if (!items || items.length === 0) return;
+    const firstMsg = items[0].msg;
+    let combinedCaption = items
+      .map((it) => (it.msg.caption || "").trim())
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+
+    if (hasIgnorePrefix(combinedCaption)) return;
+
+    // 1. Jika sedang ada ask_user yang menunggu di sesi ini, tangkap seluruh foto/dokumen
+    //    di batch ini sekaligus tanpa masuk runQueued (agar tidak deadlock).
+    if (pendingAskCount(sessionId) > 0) {
+      try {
+        const ws = ensureWorkspaceStructure(sessionId);
+        const usedNames = new Set();
+        const savedMediaList = [];
+        for (const it of items) {
+          const saved = await downloadAndSaveMediaItem(sessionId, it, ws, usedNames);
+          savedMediaList.push({
+            type: saved.type,
+            fileName: saved.fileName,
+            savedFilePath: saved.savedFilePath,
+            sandboxPath: saved.sandboxPath,
+            caption: saved.caption
+          });
+        }
+        if (takePendingAskMedia(sessionId, savedMediaList)) {
+          return;
+        }
+      } catch (err) {
+        console.warn("[AskUser Media Batch Intercept] Gagal memproses media jawaban:", err.message);
+      }
+    }
+
+    // 2. Cek pause & filter grup menggunakan gabungan caption dari rombongan album
+    if (await isChatPaused(sessionId)) {
+      return;
+    }
+
+    if (shouldIgnoreGroupMessage(firstMsg, combinedCaption)) {
+      return;
+    }
+
+    // Bersihkan mention @botUsername dari caption jika di grup
+    const BOT_USERNAME = ctx.botUsername;
+    if (BOT_USERNAME && combinedCaption) {
+      combinedCaption =
+        combinedCaption.replace(new RegExp(`@${BOT_USERNAME}\\b`, "gi"), "").trim() || combinedCaption;
+    }
+
+    const chatId = firstMsg.chat.id;
+    await runQueued(firstMsg, sessionId, async () => {
+      let typing;
+      try {
+        typing = startTyping(chatId, firstMsg.message_thread_id);
+        const ws = ensureWorkspaceStructure(sessionId);
+        const usedNames = new Set();
+        const savedItems = [];
+
+        for (const it of items) {
+          const saved = await downloadAndSaveMediaItem(sessionId, it, ws, usedNames);
+          // Untuk dokumen, jalankan indeks RAG latar belakang
+          if (saved.type === "document") {
+            ingestFileBuffer(sessionId, saved.fileName, saved.bufferData)
+              .then((res) => {
+                if (res.stored > 0) console.log(`[Knowledge] '${saved.fileName}' terindeks (${res.stored} chunk).`);
+                else if (res.skipped) console.log(`[Knowledge] '${saved.fileName}' dilewati: ${res.skipped}`);
+              })
+              .catch((e) => console.warn(`[Knowledge] Gagal mengindeks '${saved.fileName}':`, e.message));
+          }
+          savedItems.push(saved);
+        }
+
+        const prompt = combinedCaption;
+
+        // === KASUS A: Hanya 1 Foto ===
+        if (savedItems.length === 1 && savedItems[0].type === "photo") {
+          const s = savedItems[0];
+          const userTextPrompt =
+            `🖼️ [Foto Diterima]\n` +
+            `• Disimpan di server: \`uploads/${s.fileName}\` (path host: \`${s.savedFilePath}\`, ${s.fileSizeKb} KB)\n` +
+            `• Path sandbox container: \`${s.sandboxPath}\`\n` +
+            (prompt ? `• Pesan user: ${prompt}\n` : "") +
+            `\nKamu bisa melihat gambar secara visual (Vision). Jika user meminta manipulasi gambar (resize, crop, OCR, convert, edit), olah gambar ini dan letakkan hasilnya di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
+
+          const currentMessage = [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userTextPrompt },
+                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${s.base64}` } }
+              ]
+            }
+          ];
+
+          await saveMemory(
+            sessionId,
+            "user",
+            `[Kirim Foto]: ${prompt || "(tanpa caption)"} (disimpan di uploads/${s.fileName})`
+          );
+          appendRawLog(sessionId, "user", `[Kirim Foto]: ${prompt || "(tanpa caption)"} (uploads/${s.fileName})`, {
+            messageId: firstMsg.message_id
+          });
+
+          const currentHistory = await getHistoryForAI(sessionId, 12);
+          await executeAICompletionAndReply({
+            msg: firstMsg,
+            sessionId,
+            messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
+            userPromptForFiles: prompt,
+            typing
+          });
+          return;
+        }
+
+        // === KASUS B: Hanya 1 Dokumen ===
+        if (savedItems.length === 1 && savedItems[0].type === "document") {
+          const s = savedItems[0];
+          const { fileName: safeName, savedFilePath, fileSizeKb, ext, bufferData, mime, base64 } = s;
+
+          if (mime && base64) {
+            const userTextPrompt =
+              `🖼️ [Gambar HD Diterima]\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`, ${fileSizeKb} KB)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              (prompt ? `• Instruksi user: ${prompt}\n` : "") +
+              `\nKamu bisa melihat gambar secara visual (Vision). Hasil olahan simpan di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
+
+            await saveMemory(
+              sessionId,
+              "user",
+              `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`
+            );
+            appendRawLog(
+              sessionId,
+              "user",
+              `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`,
+              { messageId: firstMsg.message_id }
+            );
+
+            const currentMessage = [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: userTextPrompt },
+                  { type: "image_url", image_url: { url: `data:${mime};base64,${base64}` } }
+                ]
+              }
+            ];
+
+            const currentHistory = await getHistoryForAI(sessionId, 12);
+            await executeAICompletionAndReply({
+              msg: firstMsg,
+              sessionId,
+              messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
+              userPromptForFiles: prompt,
+              typing
+            });
+            return;
+          }
+
+          let userPrompt = "";
+          if (ext === ".zip") {
+            userPrompt =
+              `📦 [File ZIP Diterima]\n` +
+              `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              `• Folder kerja sandbox: \`/workspace/work/\`\n` +
+              `• Instruksi user: ${prompt || "Periksa dan kelola isi ZIP ini."}\n\n` +
+              `Instruksi AI Agent: File ZIP mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
+              `Ekstrak ke folder kerja (contoh: \`unzip -o "/workspace/uploads/${safeName}" -d "/workspace/work"\`), ` +
+              `lalu periksa daftar filenya dengan \`file_list\`, baca isinya dengan \`file_read\`, jalankan pengujian kode di \`/workspace/work\`, ` +
+              `dan jika ada file output jadi letakkan di \`/workspace/artifacts/\`.`;
+          } else if (
+            [
+              ".js",
+              ".ts",
+              ".jsx",
+              ".tsx",
+              ".py",
+              ".sh",
+              ".json",
+              ".html",
+              ".css",
+              ".txt",
+              ".md",
+              ".sql",
+              ".yaml",
+              ".yml"
+            ].includes(ext)
+          ) {
+            userPrompt =
+              `📄 [File Kode/Teks Diterima]\n` +
+              `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
+              `Instruksi AI Agent: File mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
+              `Jika ingin mengedit, menyalin, atau mengujinya, gunakan folder \`/workspace/work/\` atau baca dengan \`file_read\`.`;
+          } else if (ext === ".pdf" || ext === ".docx") {
+            let extractedSnippet = "";
+            try {
+              if (ext === ".pdf") {
+                const pdfData = await pdf(bufferData);
+                extractedSnippet = pdfData.text ? pdfData.text.slice(0, 3000) : "";
+              } else if (ext === ".docx") {
+                const docxData = await mammoth.extractRawText({ buffer: bufferData });
+                extractedSnippet = docxData.value ? docxData.value.slice(0, 3000) : "";
+              }
+            } catch (err) {
+              console.warn(`[Doc Preview Error] Gagal baca cuplikan ${safeName}:`, err.message);
+            }
+
+            userPrompt =
+              `📑 [Dokumen Diterima]\n` +
+              `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              `• Instruksi user: ${prompt || "Baca dan ringkas dokumen ini."}\n` +
+              (extractedSnippet ? `\n[Cuplikan Isi Teks Dokumen]:\n${extractedSnippet}\n` : "") +
+              `\nInstruksi AI Agent: File dokumen utuh tersimpan di \`/workspace/uploads/${safeName}\`.`;
+          } else if (
+            [".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".gif"].includes(ext)
+          ) {
+            userPrompt =
+              `🎬 [Video Referensi Diterima — dikirim sebagai file]\n` +
+              `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              `• Instruksi user: ${prompt || "(tanpa caption)"}\n\n` +
+              `Instruksi AI Agent: File video mentah tersimpan di \`/workspace/uploads/${safeName}\`.\n` +
+              `Jika user ingin video yang MIRIP gaya video ini (kata "kayak gini", "niru", "referensi", dsb), ` +
+              `PANGGIL tool \`analyze_video_reference\` dengan video_path di atas — hasilnya metadata, ritme cut, ` +
+              `contact sheet, dan spec gaya visual. Setelah itu simpulkan rencana videomu dalam 2-3 kalimat, ` +
+              `konfirmasi singkat lewat \`ask_user\` bila durasi/konten masih ambigu, lalu eksekusi dengan ` +
+              `\`render_remotion_video\`. Jika user hanya bertanya soal isi video, jawab dari hasil analisis.`;
+          } else {
+            userPrompt =
+              `📁 [File Diterima]\n` +
+              `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
+              `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
+              `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
+              `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
+              `Instruksi AI Agent: File telah disimpan di \`/workspace/uploads/${safeName}\`.`;
+          }
+
+          await saveMemory(
+            sessionId,
+            "user",
+            `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`
+          );
+          appendRawLog(
+            sessionId,
+            "user",
+            `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`,
+            { messageId: firstMsg.message_id }
+          );
+
+          const currentHistory = await getHistoryForAI(sessionId, 12);
+          await executeAICompletionAndReply({
+            msg: firstMsg,
+            sessionId,
+            messages: buildMessagesWithSystem([...currentHistory, { role: "user", content: userPrompt }], sessionId),
+            userPromptForFiles: prompt || userPrompt,
+            typing
+          });
+          return;
+        }
+
+        // === KASUS C: Multi-Foto / Multi-Dokumen (2+ item sekaligus dalam 1 giliran AI) ===
+        const fileListLines = [];
+        const docSnippets = [];
+        const visionParts = [];
+
+        for (let i = 0; i < savedItems.length; i++) {
+          const s = savedItems[i];
+          const label = s.type === "photo" ? "Foto" : s.mime ? "Gambar HD" : "Dokumen";
+          fileListLines.push(
+            `${i + 1}. [${label}] \`uploads/${s.fileName}\` -> Sandbox: \`${s.sandboxPath}\` (Host: \`${s.savedFilePath}\`, ${s.fileSizeKb} KB)`
+          );
+
+          if (s.base64 && s.mime) {
+            visionParts.push({
+              type: "image_url",
+              image_url: { url: `data:${s.mime};base64,${s.base64}` }
+            });
+          } else if (s.ext === ".pdf" || s.ext === ".docx") {
+            try {
+              let snippet = "";
+              if (s.ext === ".pdf") {
+                const pdfData = await pdf(s.bufferData);
+                snippet = pdfData.text ? pdfData.text.slice(0, 1500) : "";
+              } else {
+                const docxData = await mammoth.extractRawText({ buffer: s.bufferData });
+                snippet = docxData.value ? docxData.value.slice(0, 1500) : "";
+              }
+              if (snippet) {
+                docSnippets.push(`[Cuplikan ${s.fileName}]:\n${snippet}`);
+              }
+            } catch (_) {}
+          }
+        }
+
+        const multiPrompt =
+          `🖼️📦 [Paket Multi-Media Diterima: ${savedItems.length} File Sekaligus]\n` +
+          `Daftar file yang telah disimpan di workspace:\n` +
+          fileListLines.join("\n") +
+          `\n\n• Instruksi / Pesan user: ${prompt || "(tanpa caption — periksa dan proses seluruh file di atas sebagai satu kesatuan)"}\n` +
+          (docSnippets.length ? `\n${docSnippets.join("\n\n")}\n` : "") +
+          (visionParts.length
+            ? `\nKamu menerima ${visionParts.length} gambar secara visual (Vision) sesuai urutan nomor di atas. `
+            : "\n") +
+          `Jika user meminta penggabungan, kolase, PDF, ekstraksi, analisis, atau pengolahan kode/gambar, olah semua file tersebut sekaligus dan simpan hasil jadinya di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
+
+        const namesShort = savedItems.map((s) => `uploads/${s.fileName}`).join(", ");
+        const memSummary = `[Kirim ${savedItems.length} Media Sekaligus]: ${prompt || "(tanpa caption)"} (${namesShort})`;
+
+        await saveMemory(sessionId, "user", memSummary);
+        appendRawLog(sessionId, "user", memSummary, { messageId: firstMsg.message_id });
+
+        const currentHistory = await getHistoryForAI(sessionId, 12);
+        const userMessageObj =
+          visionParts.length > 0
+            ? { role: "user", content: [{ type: "text", text: multiPrompt }, ...visionParts] }
+            : { role: "user", content: multiPrompt };
+
+        await executeAICompletionAndReply({
+          msg: firstMsg,
+          sessionId,
+          messages: buildMessagesWithSystem([...currentHistory, userMessageObj], sessionId),
+          userPromptForFiles: prompt || multiPrompt,
+          typing
+        });
+      } catch (err) {
+        console.error("MEDIA BATCH ERROR:", err);
+        await replyText(firstMsg, "Gagal memproses kiriman media.");
+      } finally {
+        stopTyping(typing);
+      }
+    });
+  }
+
+  // === HANDLER FOTO (Otomatis masuk Media Batcher ~1.2 detik) ===
   bot.on("photo", async (msg) => {
     if (msg.from && msg.from.is_bot) return; // [FIX] Mencegah infinite loop bot spam
-    if (hasIgnorePrefix(msg.caption)) return;
 
     const access = await checkUserAccess(msg);
     if (!access.allowed) {
@@ -133,110 +547,12 @@ function registerHandlers(bot) {
     }
 
     const sessionId = getSessionId(msg);
-
-    // Jika sedang ada ask_user yang menunggu di sesi ini, tangkap kiriman foto langsung
-    // tanpa masuk runQueued (agar tidak deadlock dengan giliran AI yang sedang pause).
-    if (pendingAskCount(sessionId) > 0) {
-      try {
-        const photo = msg.photo[msg.photo.length - 1];
-        const file = await bot.getFile(photo.file_id);
-        const telegramUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-        const response = await axios.get(telegramUrl, { responseType: "arraybuffer" });
-        const bufferData = Buffer.from(response.data);
-        const ws = ensureWorkspaceStructure(sessionId);
-        const photoName = `photo_${Date.now()}.jpg`;
-        const savedFilePath = path.join(ws.uploadsDir, photoName);
-        writeUploadSafely(sessionId, savedFilePath, bufferData);
-        if (
-          takePendingAskMedia(sessionId, {
-            type: "photo",
-            fileName: photoName,
-            savedFilePath,
-            sandboxPath: `/workspace/uploads/${photoName}`,
-            caption: (msg.caption || "").trim()
-          })
-        ) {
-          return;
-        }
-      } catch (err) {
-        console.warn("[AskUser Photo Intercept] Gagal memproses foto jawaban:", err.message);
-      }
-    }
-
-    // Jika topik / chat sedang di-pause, bot diam
-    if (await isChatPaused(sessionId)) {
-      return;
-    }
-
-    if (shouldIgnoreGroupMessage(msg, msg.caption)) {
-      return;
-    }
-
-    const chatId = msg.chat.id;
-    await runQueued(msg, sessionId, async () => {
-      let typing;
-      try {
-        typing = startTyping(chatId, msg.message_thread_id);
-        const photo = msg.photo[msg.photo.length - 1];
-        const file = await bot.getFile(photo.file_id);
-        const telegramUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-
-        const response = await axios.get(telegramUrl, { responseType: "arraybuffer" });
-        const bufferData = Buffer.from(response.data);
-        const base64 = bufferData.toString("base64");
-        const prompt = (msg.caption || "").trim();
-
-        // Simpan fisik foto ke folder uploads workspace user
-        const ws = ensureWorkspaceStructure(sessionId);
-        const photoName = `photo_${Date.now()}.jpg`;
-        const savedFilePath = path.join(ws.uploadsDir, photoName);
-        writeUploadSafely(sessionId, savedFilePath, bufferData);
-        const fileSizeKb = (bufferData.length / 1024).toFixed(1);
-
-        const userTextPrompt =
-          `🖼️ [Foto Diterima]\n` +
-          `• Disimpan di server: \`uploads/${photoName}\` (path host: \`${savedFilePath}\`, ${fileSizeKb} KB)\n` +
-          `• Path sandbox container: \`/workspace/uploads/${photoName}\`\n` +
-          (prompt ? `• Pesan user: ${prompt}\n` : "") +
-          `\nKamu bisa melihat gambar secara visual (Vision). Jika user meminta manipulasi gambar (resize, crop, OCR, convert, edit), olah gambar ini dan letakkan hasilnya di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
-
-        const currentMessage = [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: userTextPrompt },
-              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64}` } }
-            ]
-          }
-        ];
-
-        await saveMemory(
-          sessionId,
-          "user",
-          `[Kirim Foto]: ${prompt || "(tanpa caption)"} (disimpan di uploads/${photoName})`
-        );
-        appendRawLog(sessionId, "user", `[Kirim Foto]: ${prompt || "(tanpa caption)"} (uploads/${photoName})`, {
-          messageId: msg.message_id
-        });
-
-        const currentHistory = await getHistoryForAI(sessionId, 12);
-        await executeAICompletionAndReply({
-          msg,
-          sessionId,
-          messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
-          userPromptForFiles: prompt,
-          typing
-        });
-      } catch (err) {
-        console.error("PHOTO ERROR:", err);
-        await replyText(msg, "Gagal memproses foto.");
-      } finally {
-        stopTyping(typing);
-      }
-    });
+    defaultMediaBatcher.enqueue(sessionId, { type: "photo", msg }, (items) =>
+      processMediaBatch(sessionId, items)
+    );
   });
 
-  // === HANDLER DOKUMEN ===
+  // === HANDLER DOKUMEN (Otomatis masuk Media Batcher ~1.2 detik) ===
   bot.on("document", async (msg) => {
     if (msg.from && msg.from.is_bot) return; // [FIX] Mencegah infinite loop bot spam
 
@@ -246,241 +562,15 @@ function registerHandlers(bot) {
       return handleRestore(msg, msg.document);
     }
 
-    if (hasIgnorePrefix(msg.caption)) return;
-
     const access = await checkUserAccess(msg);
     if (!access.allowed) {
       return handleAccessDenied(msg, access.status);
     }
 
     const sessionId = getSessionId(msg);
-
-    // Jika sedang ada ask_user yang menunggu di sesi ini, tangkap kiriman dokumen/file langsung
-    // tanpa masuk runQueued (agar tidak deadlock dengan giliran AI yang sedang pause).
-    if (pendingAskCount(sessionId) > 0) {
-      try {
-        const file = await bot.getFile(msg.document.file_id);
-        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-        const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
-        const bufferData = Buffer.from(response.data);
-        const rawFileName = msg.document.file_name || `file_${Date.now()}`;
-        const safeName = sanitizePath(rawFileName).replace(/[\/\\]/g, "_") || `file_${Date.now()}`;
-        const ws = ensureWorkspaceStructure(sessionId);
-        const savedFilePath = path.join(ws.uploadsDir, safeName);
-        writeUploadSafely(sessionId, savedFilePath, bufferData);
-        if (
-          takePendingAskMedia(sessionId, {
-            type: "document",
-            fileName: safeName,
-            savedFilePath,
-            sandboxPath: `/workspace/uploads/${safeName}`,
-            caption: (msg.caption || "").trim()
-          })
-        ) {
-          return;
-        }
-      } catch (err) {
-        console.warn("[AskUser Document Intercept] Gagal memproses file jawaban:", err.message);
-      }
-    }
-
-    // Jika topik / chat sedang di-pause, bot diam
-    if (await isChatPaused(sessionId)) {
-      return;
-    }
-
-    if (shouldIgnoreGroupMessage(msg, msg.caption)) {
-      return;
-    }
-
-    const chatId = msg.chat.id;
-    await runQueued(msg, sessionId, async () => {
-      let typing;
-      try {
-        typing = startTyping(chatId, msg.message_thread_id);
-        const file = await bot.getFile(msg.document.file_id);
-        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-
-        const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
-        const bufferData = Buffer.from(response.data);
-        const rawFileName = msg.document.file_name || `file_${Date.now()}`;
-        const safeName = sanitizePath(rawFileName).replace(/[\/\\]/g, "_") || `file_${Date.now()}`;
-
-        // 1. Simpan file secara fisik ke uploads/ di workspace server user
-        const ws = ensureWorkspaceStructure(sessionId);
-        const savedFilePath = path.join(ws.uploadsDir, safeName);
-        writeUploadSafely(sessionId, savedFilePath, bufferData);
-
-        // 2. Indekskan isi dokumen ke memori semantik (RAG) di latar belakang —
-        //    tidak menunda balasan meski dokumennya besar.
-        ingestFileBuffer(sessionId, safeName, bufferData)
-          .then((res) => {
-            if (res.stored > 0) console.log(`[Knowledge] '${safeName}' terindeks (${res.stored} chunk).`);
-            else if (res.skipped) console.log(`[Knowledge] '${safeName}' dilewati: ${res.skipped}`);
-          })
-          .catch((e) => console.warn(`[Knowledge] Gagal mengindeks '${safeName}':`, e.message));
-
-        const fileSizeKb = (bufferData.length / 1024).toFixed(1);
-        const prompt = (msg.caption || "").trim();
-        const ext = path.extname(safeName).toLowerCase();
-
-        let userPrompt = "";
-
-        if (ext === ".zip") {
-          userPrompt =
-            `📦 [File ZIP Diterima]\n` +
-            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            `• Folder kerja sandbox: \`/workspace/work/\`\n` +
-            `• Instruksi user: ${prompt || "Periksa dan kelola isi ZIP ini."}\n\n` +
-            `Instruksi AI Agent: File ZIP mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
-            `Ekstrak ke folder kerja (contoh: \`unzip -o "/workspace/uploads/${safeName}" -d "/workspace/work"\`), ` +
-            `lalu periksa daftar filenya dengan \`file_list\`, baca isinya dengan \`file_read\`, jalankan pengujian kode di \`/workspace/work\`, ` +
-            `dan jika ada file output jadi letakkan di \`/workspace/artifacts/\`.`;
-        } else if (
-          [
-            ".js",
-            ".ts",
-            ".jsx",
-            ".tsx",
-            ".py",
-            ".sh",
-            ".json",
-            ".html",
-            ".css",
-            ".txt",
-            ".md",
-            ".sql",
-            ".yaml",
-            ".yml"
-          ].includes(ext)
-        ) {
-          userPrompt =
-            `📄 [File Kode/Teks Diterima]\n` +
-            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
-            `Instruksi AI Agent: File mentah tersimpan di \`/workspace/uploads/${safeName}\`. ` +
-            `Jika ingin mengedit, menyalin, atau mengujinya, gunakan folder \`/workspace/work/\` atau baca dengan \`file_read\`.`;
-        } else if (ext === ".pdf" || ext === ".docx") {
-          let extractedSnippet = "";
-          try {
-            if (ext === ".pdf") {
-              const pdfData = await pdf(bufferData);
-              extractedSnippet = pdfData.text ? pdfData.text.slice(0, 3000) : "";
-            } else if (ext === ".docx") {
-              const docxData = await mammoth.extractRawText({ buffer: bufferData });
-              extractedSnippet = docxData.value ? docxData.value.slice(0, 3000) : "";
-            }
-          } catch (err) {
-            console.warn(`[Doc Preview Error] Gagal baca cuplikan ${safeName}:`, err.message);
-          }
-
-          userPrompt =
-            `📑 [Dokumen Diterima]\n` +
-            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            `• Instruksi user: ${prompt || "Baca dan ringkas dokumen ini."}\n` +
-            (extractedSnippet ? `\n[Cuplikan Isi Teks Dokumen]:\n${extractedSnippet}\n` : "") +
-            `\nInstruksi AI Agent: File dokumen utuh tersimpan di \`/workspace/uploads/${safeName}\`.`;
-        } else if ([".jpg", ".jpeg", ".png", ".webp"].includes(ext)) {
-          const mime = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
-
-          const userTextPrompt =
-            `🖼️ [Gambar HD Diterima]\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`, ${fileSizeKb} KB)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            (prompt ? `• Instruksi user: ${prompt}\n` : "") +
-            `\nKamu bisa melihat gambar secara visual (Vision). Hasil olahan simpan di \`/workspace/work/\` atau \`/workspace/artifacts/\`.`;
-
-          await saveMemory(
-            sessionId,
-            "user",
-            `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`
-          );
-          appendRawLog(
-            sessionId,
-            "user",
-            `[Kirim Gambar HD]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName})`,
-            { messageId: msg.message_id }
-          );
-
-          const currentMessage = [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: userTextPrompt },
-                { type: "image_url", image_url: { url: `data:${mime};base64,${bufferData.toString("base64")}` } }
-              ]
-            }
-          ];
-
-          const currentHistory = await getHistoryForAI(sessionId, 12);
-          await executeAICompletionAndReply({
-            msg,
-            sessionId,
-            messages: buildMessagesWithSystem([...currentHistory, ...currentMessage], sessionId),
-            userPromptForFiles: prompt,
-            typing
-          });
-          return;
-        } else if (
-          [".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".gif"].includes(ext)
-        ) {
-          // Video yang dikirim sebagai dokumen (cara umum menghindari kompresi Telegram).
-          userPrompt =
-            `🎬 [Video Referensi Diterima — dikirim sebagai file]\n` +
-            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            `• Instruksi user: ${prompt || "(tanpa caption)"}\n\n` +
-            `Instruksi AI Agent: File video mentah tersimpan di \`/workspace/uploads/${safeName}\`.\n` +
-            `Jika user ingin video yang MIRIP gaya video ini (kata "kayak gini", "niru", "referensi", dsb), ` +
-            `PANGGIL tool \`analyze_video_reference\` dengan video_path di atas — hasilnya metadata, ritme cut, ` +
-            `contact sheet, dan spec gaya visual. Setelah itu simpulkan rencana videomu dalam 2-3 kalimat, ` +
-            `konfirmasi singkat lewat \`ask_user\` bila durasi/konten masih ambigu, lalu eksekusi dengan ` +
-            `\`render_remotion_video\`. Jika user hanya bertanya soal isi video, jawab dari hasil analisis.`;
-        } else {
-          userPrompt =
-            `📁 [File Diterima]\n` +
-            `• Nama file: \`${safeName}\` (${fileSizeKb} KB)\n` +
-            `• Disimpan di: \`uploads/${safeName}\` (path host: \`${savedFilePath}\`)\n` +
-            `• Path sandbox container: \`/workspace/uploads/${safeName}\`\n` +
-            `• Instruksi user: ${prompt || "Periksa file ini."}\n\n` +
-            `Instruksi AI Agent: File telah disimpan di \`/workspace/uploads/${safeName}\`.`;
-        }
-
-        // Catat ke memori percakapan & raw memory
-        await saveMemory(
-          sessionId,
-          "user",
-          `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`
-        );
-        appendRawLog(
-          sessionId,
-          "user",
-          `[Kirim Dokumen]: ${safeName} (${fileSizeKb} KB, path: uploads/${safeName}). Instruksi: ${prompt || "-"}`,
-          { messageId: msg.message_id }
-        );
-
-        const currentHistory = await getHistoryForAI(sessionId, 12);
-        await executeAICompletionAndReply({
-          msg,
-          sessionId,
-          messages: buildMessagesWithSystem([...currentHistory, { role: "user", content: userPrompt }], sessionId),
-          userPromptForFiles: prompt || userPrompt,
-          typing
-        });
-      } catch (err) {
-        console.error("DOCUMENT ERROR:", err);
-        await replyText(msg, "Gagal memproses dokumen.");
-      } finally {
-        stopTyping(typing);
-      }
-    });
+    defaultMediaBatcher.enqueue(sessionId, { type: "document", msg }, (items) =>
+      processMediaBatch(sessionId, items)
+    );
   });
 
   // === HANDLER PESAN SUARA & AUDIO (VOICE TRANSCRIBER VIA FASTER-WHISPER) ===

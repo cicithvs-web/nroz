@@ -69,3 +69,43 @@ test("takePendingAskMedia menangkap foto/dokumen saat ask_user sedang menunggu",
   assert.match(resText, /\/workspace\/uploads\/photo_123\.jpg/);
   assert.match(resText, /ini logonya/);
 });
+
+test("takePendingAskMedia menangkap batch banyak foto/file sekaligus saat ask_user sedang menunggu", async () => {
+  _resetForTests();
+  const sessionId = "ask-multi-upload";
+  const answer = toolAskUser({ question: "Kirim 3 foto produk:", sessionId, chatId: 1 });
+  await settle();
+  assert.equal(pendingAskCount(sessionId), 1);
+
+  const intercepted = takePendingAskMedia(sessionId, [
+    {
+      type: "photo",
+      fileName: "photo_1.jpg",
+      savedFilePath: "/opt/nroz/workspace/ask-multi-upload/uploads/photo_1.jpg",
+      sandboxPath: "/workspace/uploads/photo_1.jpg",
+      caption: "tampak depan dan samping"
+    },
+    {
+      type: "photo",
+      fileName: "photo_2.jpg",
+      savedFilePath: "/opt/nroz/workspace/ask-multi-upload/uploads/photo_2.jpg",
+      sandboxPath: "/workspace/uploads/photo_2.jpg",
+      caption: ""
+    },
+    {
+      type: "photo",
+      fileName: "photo_3.jpg",
+      savedFilePath: "/opt/nroz/workspace/ask-multi-upload/uploads/photo_3.jpg",
+      sandboxPath: "/workspace/uploads/photo_3.jpg",
+      caption: ""
+    }
+  ]);
+  assert.equal(intercepted, true);
+  assert.equal(pendingAskCount(sessionId), 0);
+  const resText = await answer;
+  assert.match(resText, /3 file sekaligus/);
+  assert.match(resText, /photo_1\.jpg/);
+  assert.match(resText, /photo_2\.jpg/);
+  assert.match(resText, /photo_3\.jpg/);
+  assert.match(resText, /tampak depan dan samping/);
+});
