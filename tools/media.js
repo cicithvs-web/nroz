@@ -5,11 +5,150 @@
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
+const http = require("http");
 const { startWebPreview } = require("../webPreviewManager.js");
 const { queueRender } = require("../remotionManager.js");
 const { sessionWorkspacePath } = require("../lib/paths");
 const { assertPublicUrl, BlockedUrlError } = require("../lib/netGuard");
 const { truncate, resolveFilePath } = require("./common");
+
+/**
+ * Mengambil metadata TikTok (termasuk kumpulan foto slide & video) dari TikWM API.
+ */
+function fetchJsonTikWM(tiktokUrl) {
+  return new Promise((resolve, reject) => {
+    const postData = `url=${encodeURIComponent(tiktokUrl)}`;
+    const req = https.request("https://www.tikwm.com/api/", {
+      method: "POST",
+      family: 4,
+      timeout: 15000,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    }, (res) => {
+      let body = "";
+      res.on("data", (c) => { body += c; });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (e) {
+          reject(new Error(`Gagal parsing response TikWM: ${body.slice(0, 100)}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error("Timeout menghubungi TikWM API")); });
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Mengunduh file dari URL langsung ke path disk lokal (mengikuti redirect).
+ */
+function downloadFileToDisk(fileUrl, destPath, redirects = 0) {
+  if (redirects > 5) return Promise.reject(new Error("Terlalu banyak redirect"));
+  return new Promise((resolve, reject) => {
+    const client = fileUrl.startsWith("https") ? https : http;
+    const req = client.get(fileUrl, {
+      family: 4,
+      timeout: 30000,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadFileToDisk(res.headers.location, destPath, redirects + 1).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode} saat mengunduh file`));
+      }
+      const stream = fs.createWriteStream(destPath);
+      res.pipe(stream);
+      stream.on("finish", () => {
+        stream.close(() => resolve(destPath));
+      });
+      stream.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error("Timeout saat mengunduh file")); });
+  });
+}
+
+/**
+ * Menangani unduhan postingan TikTok khusus slide foto (atau fallback video).
+ */
+async function downloadTikTokMedia({ url, format, workspaceDir }) {
+  const data = await fetchJsonTikWM(url);
+  if (!data || data.code !== 0 || !data.data) {
+    throw new Error(data?.msg || "Gagal mendapatkan data media dari TikTok API");
+  }
+
+  const d = data.data;
+  const artifactsDir = path.join(workspaceDir, "artifacts");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+
+  const safeId = String(d.id || Date.now()).replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  // A. Jika postingan berisi kumpulan foto slide:
+  if (Array.isArray(d.images) && d.images.length > 0) {
+    const downloadedImages = [];
+    for (let i = 0; i < d.images.length; i++) {
+      const imgUrl = d.images[i];
+      if (!imgUrl) continue;
+      const fileName = `tiktok_slide_${safeId}_${i + 1}.jpg`;
+      const filePath = path.join(artifactsDir, fileName);
+      try {
+        await assertPublicUrl(imgUrl);
+        await downloadFileToDisk(imgUrl, filePath);
+        downloadedImages.push(fileName);
+      } catch (imgErr) {
+        console.warn(`[TikTok Slide] Gagal unduh slide ${i + 1}: ${imgErr.message}`);
+      }
+    }
+
+    if (downloadedImages.length === 0) {
+      throw new Error("Gagal mengunduh foto-foto slide TikTok.");
+    }
+
+    let musicName = null;
+    if (d.music) {
+      const mPath = path.join(artifactsDir, `tiktok_music_${safeId}.mp3`);
+      try {
+        await assertPublicUrl(d.music);
+        await downloadFileToDisk(d.music, mPath);
+        musicName = path.basename(mPath);
+      } catch (_) {}
+    }
+
+    const listStr = downloadedImages.map((f, i) => `${i + 1}. /workspace/artifacts/${f}`).join("\n");
+    const musicStr = musicName ? `\n• Musik pengiring: /workspace/artifacts/${musicName}` : "";
+
+    return (
+      `✅ Berhasil mengunduh ${downloadedImages.length} foto slide TikTok (Judul: "${(d.title || "TikTok Slide").slice(0, 50)}"):` +
+      `\n\n${listStr}${musicStr}\n\n` +
+      `Kirimkan foto-foto slide ini ke chat user menggunakan tool send_photo (file_path: "/workspace/artifacts/...").`
+    );
+  }
+
+  // B. Jika postingan berupa video biasa (dipanggil saat yt-dlp gagal sebagai fallback):
+  const videoUrl = d.play || d.wmplay || d.hdplay;
+  if (videoUrl) {
+    const safeTitle = (d.title || "tiktok")
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, "_")
+      .slice(0, 30);
+    const videoFileName = `${safeTitle || "tiktok"}_${safeId}.mp4`;
+    const videoFilePath = path.join(workspaceDir, videoFileName);
+    await assertPublicUrl(videoUrl);
+    await downloadFileToDisk(videoUrl, videoFilePath);
+    const sandboxPath = `/workspace/${videoFileName}`;
+    return `✅ Berhasil mengunduh media:\n${videoFileName}\n\nKirimkan file ini ke user menggunakan tool send_file dengan file_path "${sandboxPath}".`;
+  }
+
+  throw new Error("Tidak ditemukan stream video maupun foto pada postingan TikTok ini.");
+}
 
 /**
  * Argumen yt-dlp sebagai array (dijalankan dengan execFile, tanpa shell), jadi URL dari
@@ -47,8 +186,9 @@ function runYtDlp(args, timeoutMs = 120_000) {
  */
 async function toolMediaDownload({ url, format = "video", sessionId }) {
   if (!url || typeof url !== "string") return "❌ 'url' wajib diisi.";
+  const trimmedUrl = url.trim();
   try {
-    await assertPublicUrl(url.trim());
+    await assertPublicUrl(trimmedUrl);
   } catch (err) {
     if (err instanceof BlockedUrlError) return `⛔ ${err.message}`;
     throw err;
@@ -56,11 +196,25 @@ async function toolMediaDownload({ url, format = "video", sessionId }) {
 
   const workspaceDir = sessionWorkspacePath(sessionId);
   fs.mkdirSync(workspaceDir, { recursive: true });
+
+  const isTikTok = /tiktok\.com/i.test(trimmedUrl);
+  const isPhotoRequest = format === "photo" || format === "slide" || format === "image" || /\/photo\//i.test(trimmedUrl);
+
+  // Jika URL TikTok dan merupakan postingan foto/slide (atau diminta format photo):
+  if (isTikTok && isPhotoRequest) {
+    try {
+      const tiktokResult = await downloadTikTokMedia({ url: trimmedUrl, format, workspaceDir });
+      if (tiktokResult) return tiktokResult;
+    } catch (ttErr) {
+      console.warn(`[TikTok Extractor] Gagal via API: ${ttErr.message}, mencoba fallback ke yt-dlp...`);
+    }
+  }
+
   const outputTemplate = path.join(workspaceDir, "%(title).40s.%(ext)s");
   const startedAt = Date.now();
 
   try {
-    const { stdout } = await runYtDlp(buildYtDlpArgs(url.trim(), format, outputTemplate));
+    const { stdout } = await runYtDlp(buildYtDlpArgs(trimmedUrl, format, outputTemplate));
 
     // yt-dlp mencetak path final; kalau tidak ada, cari file terbaru di workspace.
     let downloadedFile = stdout
@@ -89,6 +243,16 @@ async function toolMediaDownload({ url, format = "video", sessionId }) {
     }
     return `✅ Selesai:\n${truncate(stdout)}`;
   } catch (err) {
+    // Fallback TikTok: Jika yt-dlp gagal pada URL TikTok, coba ekstrak via TikWM (bisa jadi postingan foto slide atau video)
+    if (isTikTok) {
+      try {
+        const tiktokResult = await downloadTikTokMedia({ url: trimmedUrl, format, workspaceDir });
+        if (tiktokResult) return tiktokResult;
+      } catch (ttFallbackErr) {
+        console.warn(`[TikTok Fallback] Gagal: ${ttFallbackErr.message}`);
+      }
+    }
+
     if (err.killed) return "⏱️ Unduhan dihentikan karena melebihi 120 detik.";
     const stderr = err.stderr ? err.stderr.toString() : "";
     return truncate(`❌ Gagal mengunduh media: ${stderr || err.message}`);

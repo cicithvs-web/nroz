@@ -499,18 +499,18 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "media_download",
       description:
-        "Mengunduh video atau audio dari link media (YouTube, TikTok, Instagram, Twitter/X, dsb.) menggunakan yt-dlp ke folder workspace.",
+        "Mengunduh video, audio, atau postingan foto slide dari link media (TikTok, YouTube, Instagram, Twitter/X, dsb.) ke folder workspace.",
       parameters: {
         type: "object",
         properties: {
           url: {
             type: "string",
-            description: "Link/URL video atau audio yang ingin diunduh",
+            description: "Link/URL video, audio, atau postingan foto/slide yang ingin diunduh",
           },
           format: {
             type: "string",
-            enum: ["video", "audio"],
-            description: "Format yang diinginkan: 'video' (MP4) atau 'audio' (MP3)",
+            enum: ["video", "audio", "photo"],
+            description: "Format yang diinginkan: 'video' (MP4), 'audio' (MP3), atau 'photo' (untuk unduh foto/slide)",
           },
         },
         required: ["url"],
